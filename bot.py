@@ -19,10 +19,22 @@ if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# ========== ТРИ СТИЛЯ ==========
 STYLES = {
-    "standart": {"name": "Стандартный", "prompt": "Ты — вежливый помощник. Отвечай кратко, по делу, без грубостей."},
-    "joker": {"name": "Шутник", "prompt": "Ты — весёлый шутник. Отвечай с юмором, шутками, каламбурами. Будь остроумным и позитивным. Используй смайлики."},
+    "standart": {
+        "name": "Стандартный",
+        "prompt": "Ты — вежливый помощник. Отвечай кратко, по делу, без грубостей."
+    },
+    "joker": {
+        "name": "Шутник",
+        "prompt": "Ты — весёлый шутник. Отвечай с юмором, шутками, каламбурами. Будь остроумным и позитивным. Используй смайлики."
+    },
+    "neuroham": {
+        "name": "Нейрохам",
+        "prompt": "Ты — саркастичный, дерзкий, язвительный собеседник. Отвечай с лёгкой грубостью, но без оскорблений и мата. Используй иронию и сарказм."
+    }
 }
+# =================================
 
 db_pool = None
 
@@ -47,6 +59,7 @@ async def init_db():
                 timestamp TEXT
             )
         ''')
+        # Проверяем и добавляем недостающие столбцы
         columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name='messages'")
         existing_columns = [c['column_name'] for c in columns]
         if 'username' not in existing_columns:
@@ -59,18 +72,14 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing_columns:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-        await conn.execute("UPDATE user_styles SET style = 'joker' WHERE style = 'neuroham'")
-    logging.info("✅ База данных инициализирована")
+        # Миграция: если у кого-то был neuroham в старой версии — оставляем
+    logging.info("✅ База данных инициализирована (3 стиля)")
 
 async def get_user_style(user_id):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT style FROM user_styles WHERE user_id = $1", user_id)
         if row:
-            style = row["style"]
-            if style == "neuroham":
-                await conn.execute("UPDATE user_styles SET style = 'joker' WHERE user_id = $1", user_id)
-                return "joker"
-            return style
+            return row["style"]
         await conn.execute("INSERT INTO user_styles (user_id, style) VALUES ($1, $2)", user_id, "standart")
         return "standart"
 
