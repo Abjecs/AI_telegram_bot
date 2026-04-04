@@ -81,8 +81,12 @@ async def handle_message(update, context):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
-            # Попробуем передать system_prompt, если не работает — закомментируем и используем messages
-            response = await giga.achat(user_message, system_prompt=style_prompt)
+            # Правильный вызов: передаём список сообщений
+            messages = [
+                {"role": "system", "content": style_prompt},
+                {"role": "user", "content": user_message}
+            ]
+            response = await giga.achat(messages)
             ai_reply = response.choices[0].message.content
         await save_message(user_id, username, user_message, ai_reply, style_key)
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🆘 Помощь", callback_data="help")], [InlineKeyboardButton("🎭 Сменить стиль", callback_data="change_style")]])
