@@ -8,7 +8,6 @@ from telegram.ext import Application, MessageHandler, filters, ContextTypes, Com
 from gigachat import GigaChat
 import asyncpg
 
-# ==================== КОНФИГУРАЦИЯ ====================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -29,7 +28,6 @@ STYLES = {
         "name": "Нейрохам",
         "prompt": "Ты — агрессивный, грубый, язвительный тролль. Отвечай с сарказмом, оскорблениями, используй мат. Твоя цель — задеть собеседника."
     },
-    # Сюда можно добавлять новые стили
 }
 
 # ==================== БАЗА ДАННЫХ ====================
@@ -126,12 +124,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
-            # Используем messages с system prompt
-            messages = [
-                {"role": "system", "content": style_prompt},
-                {"role": "user", "content": user_message}
-            ]
-            response = await giga.achat(messages)
+            # ПРАВИЛЬНЫЙ ВЫЗОВ С СИСТЕМНЫМ ПРОМПТОМ
+            response = await giga.achat(user_message, system_prompt=style_prompt)
             ai_reply = response.choices[0].message.content
 
         await save_message(user_id, username, user_message, ai_reply, style_key)
@@ -143,7 +137,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(ai_reply, reply_markup=keyboard)
     except Exception as e:
         logging.error(f"Ошибка GigaChat: {e}")
-        await update.message.reply_text("❌ Ошибка. Попробуйте позже.")
+        await update.message.reply_text("❌ Ошибка при обращении к GigaChat. Попробуйте позже.")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
