@@ -19,17 +19,9 @@ if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# ==================== СТИЛИ ОБЩЕНИЯ ====================
 STYLES = {
-    "standart": {
-        "name": "Стандартный",
-        "prompt": "Ты — вежливый помощник. Отвечай кратко, по делу, без грубостей."
-    },
-    "joker": {   # ранее был "neuroham"
-        "name": "Шутник",
-        "prompt": "Ты — весёлый шутник. Отвечай с юмором, шутками, каламбурами. Будь остроумным и позитивным. Используй смайлики."
-    },
-    # Сюда можно добавлять новые стили
+    "standart": {"name": "Стандартный", "prompt": "Ты — вежливый помощник. Отвечай кратко, по делу, без грубостей."},
+    "joker": {"name": "Шутник", "prompt": "Ты — весёлый шутник. Отвечай с юмором, шутками, каламбурами. Будь остроумным и позитивным. Используй смайлики."},
 }
 
 db_pool = None
@@ -55,7 +47,6 @@ async def init_db():
                 timestamp TEXT
             )
         ''')
-        # Проверяем и добавляем недостающие столбцы
         columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name='messages'")
         existing_columns = [c['column_name'] for c in columns]
         if 'username' not in existing_columns:
@@ -68,16 +59,14 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing_columns:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-        # Обновляем старые записи: если у пользователя был выбран 'neuroham', меняем на 'joker'
         await conn.execute("UPDATE user_styles SET style = 'joker' WHERE style = 'neuroham'")
-    logging.info("✅ База данных инициализирована, стиль 'Нейрохам' заменён на 'Шутник'")
+    logging.info("✅ База данных инициализирована")
 
 async def get_user_style(user_id):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT style FROM user_styles WHERE user_id = $1", user_id)
         if row:
             style = row["style"]
-            # Если вдруг остался 'neuroham' (по каким-то причинам), заменяем на 'joker'
             if style == "neuroham":
                 await conn.execute("UPDATE user_styles SET style = 'joker' WHERE user_id = $1", user_id)
                 return "joker"
@@ -137,24 +126,11 @@ async def handle_message(update, context):
             response = await giga.achat(payload)
             ai_reply = response.choices[0].message.content
         await save_message(user_id, username, user_message, ai_reply, style_key)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🆘 Помощь", callback_data="help")],
-            [InlineKeyboardButton("🎭 Сменить стиль", callback_data="change_style")]
-        ])
-        await update.message.reply_text(ai_reply, reply_markup=keyboard)
+        await update.message.reply_text(ai_reply)
     except Exception as e:
         error_text = f"❌ Ошибка GigaChat: {type(e).__name__}: {e}\n{traceback.format_exc()}"
         logging.error(error_text)
         await update.message.reply_text(f"Ошибка: {type(e).__name__}. Подробности в логах Render.")
-
-async def button_callback(update, context):
-    query = update.callback_query
-    await query.answer()
-    if query.data == "help":
-        await query.edit_message_text("Используйте /style для смены стиля.", parse_mode="Markdown")
-    elif query.data == "change_style":
-        keyboard = [[InlineKeyboardButton(v["name"], callback_data=f"style_{k}")] for k, v in STYLES.items()]
-        await query.edit_message_text("Выберите стиль:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_webhook(request):
     try:
@@ -178,7 +154,6 @@ async def main():
     bot_app.add_handler(CommandHandler("style", style_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     bot_app.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
-    bot_app.add_handler(CallbackQueryHandler(button_callback, pattern="^(help|change_style)$"))
     await bot_app.initialize()
     await bot_app.start()
     external_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "ai-telegram-bot-5sfg.onrender.com")
