@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import traceback
 from datetime import datetime
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -16,7 +17,7 @@ PORT = int(os.environ.get("PORT", 8080))
 if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
     raise ValueError("Ошибка: переменные не установлены!")
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 STYLES = {
     "standart": {"name": "Стандартный", "prompt": "Ты — вежливый помощник. Отвечай кратко, без грубостей."},
@@ -80,14 +81,16 @@ async def handle_message(update, context):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+            # Попробуем передать system_prompt, если не работает — закомментируем и используем messages
             response = await giga.achat(user_message, system_prompt=style_prompt)
             ai_reply = response.choices[0].message.content
         await save_message(user_id, username, user_message, ai_reply, style_key)
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🆘 Помощь", callback_data="help")], [InlineKeyboardButton("🎭 Сменить стиль", callback_data="change_style")]])
         await update.message.reply_text(ai_reply, reply_markup=keyboard)
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await update.message.reply_text("❌ Ошибка. Попробуйте позже.")
+        error_text = f"❌ Ошибка GigaChat: {type(e).__name__}: {e}\n{traceback.format_exc()}"
+        logging.error(error_text)
+        await update.message.reply_text(f"Ошибка: {type(e).__name__}. Подробности в логах Render.")
 
 async def button_callback(update, context):
     query = update.callback_query
@@ -104,7 +107,8 @@ async def handle_webhook(request):
         update = Update.de_json(data, bot_app.bot)
         await bot_app.process_update(update)
         return web.Response(status=200)
-    except:
+    except Exception as e:
+        logging.error(f"Webhook error: {e}")
         return web.Response(status=200)
 
 async def health(request):
