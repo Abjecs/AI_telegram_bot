@@ -19,9 +19,17 @@ if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# ==================== СТИЛИ ОБЩЕНИЯ ====================
 STYLES = {
-    "standart": {"name": "Стандартный", "prompt": "Ты — вежливый помощник. Отвечай кратко, без грубостей."},
-    "neuroham": {"name": "Нейрохам", "prompt": "Ты — грубый тролль. Отвечай с сарказмом, оскорблениями, используй мат."},
+    "standart": {
+        "name": "Стандартный",
+        "prompt": "Ты — вежливый помощник. Отвечай кратко, по делу, без грубостей."
+    },
+    "joker": {   # ранее был "neuroham"
+        "name": "Шутник",
+        "prompt": "Ты — весёлый шутник. Отвечай с юмором, шутками, каламбурами. Будь остроумным и позитивным. Используй смайлики."
+    },
+    # Сюда можно добавлять новые стили
 }
 
 db_pool = None
@@ -30,15 +38,50 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
-        await conn.execute('CREATE TABLE IF NOT EXISTS user_styles (user_id BIGINT PRIMARY KEY, style TEXT DEFAULT "standart")')
-        await conn.execute('CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, user_id BIGINT, username TEXT, user_message TEXT, bot_reply TEXT, style_used TEXT, timestamp TEXT)')
-    logging.info("✅ База данных готова")
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_styles (
+                user_id BIGINT PRIMARY KEY,
+                style TEXT DEFAULT 'standart'
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                username TEXT,
+                user_message TEXT,
+                bot_reply TEXT,
+                style_used TEXT,
+                timestamp TEXT
+            )
+        ''')
+        # Проверяем и добавляем недостающие столбцы
+        columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name='messages'")
+        existing_columns = [c['column_name'] for c in columns]
+        if 'username' not in existing_columns:
+            await conn.execute('ALTER TABLE messages ADD COLUMN username TEXT')
+        if 'user_message' not in existing_columns:
+            await conn.execute('ALTER TABLE messages ADD COLUMN user_message TEXT')
+        if 'bot_reply' not in existing_columns:
+            await conn.execute('ALTER TABLE messages ADD COLUMN bot_reply TEXT')
+        if 'style_used' not in existing_columns:
+            await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
+        if 'timestamp' not in existing_columns:
+            await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
+        # Обновляем старые записи: если у пользователя был выбран 'neuroham', меняем на 'joker'
+        await conn.execute("UPDATE user_styles SET style = 'joker' WHERE style = 'neuroham'")
+    logging.info("✅ База данных инициализирована, стиль 'Нейрохам' заменён на 'Шутник'")
 
 async def get_user_style(user_id):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT style FROM user_styles WHERE user_id = $1", user_id)
         if row:
-            return row["style"]
+            style = row["style"]
+            # Если вдруг остался 'neuroham' (по каким-то причинам), заменяем на 'joker'
+            if style == "neuroham":
+                await conn.execute("UPDATE user_styles SET style = 'joker' WHERE user_id = $1", user_id)
+                return "joker"
+            return style
         await conn.execute("INSERT INTO user_styles (user_id, style) VALUES ($1, $2)", user_id, "standart")
         return "standart"
 
@@ -50,7 +93,10 @@ async def set_user_style(user_id, style):
 
 async def save_message(user_id, username, user_message, bot_reply, style_used):
     async with db_pool.acquire() as conn:
-        await conn.execute('INSERT INTO messages (user_id, username, user_message, bot_reply, style_used, timestamp) VALUES ($1, $2, $3, $4, $5, $6)', user_id, username, user_message, bot_reply, style_used, datetime.now().isoformat())
+        await conn.execute('''
+            INSERT INTO messages (user_id, username, user_message, bot_reply, style_used, timestamp)
+            VALUES ($1, $2, $3, $4, $5, $6)
+        ''', user_id, username, user_message, bot_reply, style_used, datetime.now().isoformat())
 
 async def start(update, context):
     style = await get_user_style(update.effective_user.id)
@@ -62,7 +108,7 @@ async def help_command(update, context):
 
 async def style_command(update, context):
     keyboard = [[InlineKeyboardButton(v["name"], callback_data=f"style_{k}")] for k, v in STYLES.items()]
-    await update.message.reply_text("Выберите стиль:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Выберите стиль общения:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def style_callback(update, context):
     query = update.callback_query
@@ -71,6 +117,8 @@ async def style_callback(update, context):
     if style_key in STYLES:
         await set_user_style(update.effective_user.id, style_key)
         await query.edit_message_text(f"✅ Стиль изменён на *{STYLES[style_key]['name']}*", parse_mode="Markdown")
+    else:
+        await query.edit_message_text("❌ Неизвестный стиль.")
 
 async def handle_message(update, context):
     user_message = update.message.text
@@ -81,7 +129,6 @@ async def handle_message(update, context):
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
         async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
-            # Передаём список сообщений, обёрнутый в словарь с ключом "messages"
             messages = [
                 {"role": "system", "content": style_prompt},
                 {"role": "user", "content": user_message}
@@ -90,7 +137,10 @@ async def handle_message(update, context):
             response = await giga.achat(payload)
             ai_reply = response.choices[0].message.content
         await save_message(user_id, username, user_message, ai_reply, style_key)
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🆘 Помощь", callback_data="help")], [InlineKeyboardButton("🎭 Сменить стиль", callback_data="change_style")]])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🆘 Помощь", callback_data="help")],
+            [InlineKeyboardButton("🎭 Сменить стиль", callback_data="change_style")]
+        ])
         await update.message.reply_text(ai_reply, reply_markup=keyboard)
     except Exception as e:
         error_text = f"❌ Ошибка GigaChat: {type(e).__name__}: {e}\n{traceback.format_exc()}"
