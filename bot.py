@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler, CallbackQueryHandler
@@ -15,8 +15,8 @@ GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.environ.get("PORT", 8080))
 
-# ⚠️ ВАШ TELEGRAM ID (получен через @userinfobot)
-ADMIN_ID = 6963945662   # <--- Убедитесь, что это ваш ID
+# ⚠️ ЗАМЕНИТЕ НА ВАШ TELEGRAM ID (получен через @userinfobot)
+ADMIN_ID = 6963945662
 
 if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
     raise ValueError("Ошибка: переменные не установлены!")
@@ -63,6 +63,7 @@ async def init_db():
                 blocked_at TEXT
             )
         ''')
+        # Добавляем недостающие столбцы для обратной совместимости
         columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name='messages'")
         existing = [c['column_name'] for c in columns]
         if 'username' not in existing:
@@ -75,7 +76,7 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-    logging.info("✅ База данных готова")
+    logging.info("✅ База данных инициализирована")
 
 async def is_blocked(user_id: int) -> bool:
     async with db_pool.acquire() as conn:
@@ -112,17 +113,13 @@ async def save_message(user_id, username, user_message, bot_reply, style_used):
             VALUES ($1, $2, $3, $4, $5, $6)
         ''', user_id, username, user_message, bot_reply, style_used, datetime.now().isoformat())
 
-# ==================== АДМИНСКИЕ КОМАНДЫ ====================
-async def admin_only(func):
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_user.id != ADMIN_ID:
-            await update.message.reply_text("⛔ У вас нет прав администратора.")
-            return
-        return await func(update, context)
-    return wrapper
-
-@admin_only
+# ==================== АДМИНСКИЕ КОМАНДЫ (с явной проверкой ID) ====================
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    logging.info(f"Вызов /stats от пользователя {user_id}")
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
     async with db_pool.acquire() as conn:
         total_users = await conn.fetchval("SELECT COUNT(*) FROM user_styles")
         total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages")
@@ -139,8 +136,11 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML"
     )
 
-@admin_only
 async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id, style FROM user_styles ORDER BY user_id LIMIT 20")
     if not rows:
@@ -152,44 +152,56 @@ async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"<code>{row['user_id']}</code> – {STYLES[row['style']]['name']} {blocked}\n"
     await update.message.reply_text(text, parse_mode="HTML")
 
-@admin_only
 async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
     if not context.args:
         await update.message.reply_text("Использование: /block <user_id>")
         return
     try:
-        user_id = int(context.args[0])
-        await block_user(user_id)
-        await update.message.reply_text(f"✅ Пользователь {user_id} заблокирован.")
+        target_id = int(context.args[0])
+        await block_user(target_id)
+        await update.message.reply_text(f"✅ Пользователь {target_id} заблокирован.")
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
-@admin_only
 async def unblock_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
     if not context.args:
         await update.message.reply_text("Использование: /unblock <user_id>")
         return
     try:
-        user_id = int(context.args[0])
-        await unblock_user(user_id)
-        await update.message.reply_text(f"✅ Пользователь {user_id} разблокирован.")
+        target_id = int(context.args[0])
+        await unblock_user(target_id)
+        await update.message.reply_text(f"✅ Пользователь {target_id} разблокирован.")
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
-@admin_only
 async def reset_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
     if not context.args:
         await update.message.reply_text("Использование: /reset_style <user_id>")
         return
     try:
-        user_id = int(context.args[0])
-        await set_user_style(user_id, "standart")
-        await update.message.reply_text(f"✅ Стиль пользователя {user_id} сброшен на «Стандартный».")
+        target_id = int(context.args[0])
+        await set_user_style(target_id, "standart")
+        await update.message.reply_text(f"✅ Стиль пользователя {target_id} сброшен на «Стандартный».")
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
-@admin_only
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
     if not context.args:
         await update.message.reply_text("Использование: /broadcast <текст сообщения>")
         return
@@ -209,8 +221,11 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
     await update.message.reply_text(f"✅ Рассылка отправлена {sent} пользователям.")
 
-@admin_only
 async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("⛔ У вас нет прав администратора.")
+        return
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id, username, user_message, bot_reply, timestamp FROM messages ORDER BY id DESC LIMIT 10")
     if not rows:
