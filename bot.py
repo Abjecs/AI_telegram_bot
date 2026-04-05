@@ -15,8 +15,8 @@ GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 PORT = int(os.environ.get("PORT", 8080))
 
-# ⚠️ ЗАМЕНИТЕ НА ВАШ ID (получите через @userinfobot)
-ADMIN_ID = 6963945662  # <--- ВСТАВЬТЕ СЮДА ВАШ TELEGRAM ID
+# ⚠️ ВАШ TELEGRAM ID (получен через @userinfobot)
+ADMIN_ID = 6963945662   # <--- Убедитесь, что это ваш ID
 
 if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
     raise ValueError("Ошибка: переменные не установлены!")
@@ -40,14 +40,12 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
-        # Таблица стилей пользователей
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_styles (
                 user_id BIGINT PRIMARY KEY,
                 style TEXT DEFAULT 'standart'
             )
         ''')
-        # Таблица сообщений
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -59,14 +57,12 @@ async def init_db():
                 timestamp TEXT
             )
         ''')
-        # Таблица заблокированных пользователей
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS blocked_users (
                 user_id BIGINT PRIMARY KEY,
                 blocked_at TEXT
             )
         ''')
-        # Добавляем недостающие столбцы (для совместимости)
         columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name='messages'")
         existing = [c['column_name'] for c in columns]
         if 'username' not in existing:
@@ -79,7 +75,7 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-    logging.info("✅ База данных готова (включая блокировки)")
+    logging.info("✅ База данных готова")
 
 async def is_blocked(user_id: int) -> bool:
     async with db_pool.acquire() as conn:
@@ -118,7 +114,6 @@ async def save_message(user_id, username, user_message, bot_reply, style_used):
 
 # ==================== АДМИНСКИЕ КОМАНДЫ ====================
 async def admin_only(func):
-    """Декоратор для проверки прав администратора."""
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != ADMIN_ID:
             await update.message.reply_text("⛔ У вас нет прав администратора.")
@@ -136,12 +131,12 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         today_messages = await conn.fetchval("SELECT COUNT(*) FROM messages WHERE timestamp >= $1", today_start)
         blocked = await conn.fetchval("SELECT COUNT(*) FROM blocked_users")
     await update.message.reply_text(
-        f"📊 *Статистика*\n"
+        f"📊 <b>Статистика</b>\n"
         f"👥 Всего пользователей: {total_users}\n"
         f"💬 Всего сообщений: {total_messages}\n"
         f"📆 Сообщений сегодня: {today_messages}\n"
         f"🚫 Заблокировано: {blocked}",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
 
 @admin_only
@@ -151,11 +146,11 @@ async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("Нет пользователей.")
         return
-    text = "👥 *Список пользователей (первые 20):*\n"
+    text = "👥 <b>Список пользователей (первые 20):</b>\n"
     for row in rows:
         blocked = "🚫" if await is_blocked(row["user_id"]) else "✅"
-        text += f"`{row['user_id']}` – {STYLES[row['style']]['name']} {blocked}\n"
-    await update.message.reply_text(text, parse_mode="Markdown")
+        text += f"<code>{row['user_id']}</code> – {STYLES[row['style']]['name']} {blocked}\n"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 @admin_only
 async def block_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -207,9 +202,9 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if await is_blocked(uid):
             continue
         try:
-            await context.bot.send_message(uid, f"📢 *Рассылка от администратора:*\n{text}", parse_mode="Markdown")
+            await context.bot.send_message(uid, f"📢 <b>Рассылка от администратора:</b>\n{text}", parse_mode="HTML")
             sent += 1
-            await asyncio.sleep(0.05)  # небольшая задержка
+            await asyncio.sleep(0.05)
         except:
             pass
     await update.message.reply_text(f"✅ Рассылка отправлена {sent} пользователям.")
@@ -221,23 +216,23 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("Нет сообщений.")
         return
-    text = "📜 *Последние 10 диалогов:*\n\n"
+    text = "📜 <b>Последние 10 диалогов:</b>\n\n"
     for row in rows:
-        text += f"👤 `{row['user_id']}` ({row['username'] or 'no name'}): {row['user_message'][:50]}\n"
+        text += f"👤 <code>{row['user_id']}</code> ({row['username'] or 'no name'}): {row['user_message'][:50]}\n"
         text += f"🤖 Бот: {row['bot_reply'][:50]}\n"
         text += f"🕒 {row['timestamp']}\n\n"
-    await update.message.reply_text(text[:4000], parse_mode="Markdown")  # Telegram лимит
+    await update.message.reply_text(text[:4000], parse_mode="HTML")
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     style = await get_user_style(update.effective_user.id)
-    await update.message.reply_text(f"Привет! Твой стиль: *{STYLES[style]['name']}*. /style — сменить.", parse_mode="Markdown")
+    await update.message.reply_text(f"Привет! Твой стиль: <b>{STYLES[style]['name']}</b>. /style — сменить.", parse_mode="HTML")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "/start — приветствие\n/help — справка\n/style — выбрать стиль\n\nДоступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     if update.effective_user.id == ADMIN_ID:
-        text += "\n\n*Админ-команды:*\n/stats — статистика\n/users — список пользователей\n/block <id> — заблокировать\n/unblock <id> — разблокировать\n/reset_style <id> — сбросить стиль\n/broadcast <текст> — рассылка\n/history — последние 10 диалогов"
-    await update.message.reply_text(text, parse_mode="Markdown")
+        text += "\n\n<b>Админ-команды:</b>\n/stats — статистика\n/users — список пользователей\n/block &lt;id&gt; — заблокировать\n/unblock &lt;id&gt; — разблокировать\n/reset_style &lt;id&gt; — сбросить стиль\n/broadcast &lt;текст&gt; — рассылка\n/history — последние 10 диалогов"
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def style_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(v["name"], callback_data=f"style_{k}")] for k, v in STYLES.items()]
@@ -249,7 +244,7 @@ async def style_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     style_key = query.data[6:]
     if style_key in STYLES:
         await set_user_style(update.effective_user.id, style_key)
-        await query.edit_message_text(f"✅ Стиль изменён на *{STYLES[style_key]['name']}*", parse_mode="Markdown")
+        await query.edit_message_text(f"✅ Стиль изменён на <b>{STYLES[style_key]['name']}</b>", parse_mode="HTML")
     else:
         await query.edit_message_text("❌ Неизвестный стиль.")
 
@@ -299,7 +294,7 @@ async def main():
     global bot_app
     await init_db()
     bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
-    # Регистрация команд
+    # Основные команды
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("help", help_command))
     bot_app.add_handler(CommandHandler("style", style_command))
