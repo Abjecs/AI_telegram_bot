@@ -2,6 +2,9 @@ import os
 import sys
 import logging
 from fastapi import FastAPI
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+import base64
 from sqlalchemy import create_engine, Column, Integer, String, Text, BigInteger
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -9,7 +12,7 @@ from sqladmin import Admin, ModelView
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logging.info("=== Starting admin_app.py ===")
+logging.info("=== Starting admin_app.py with authentication ===")
 
 # Переменные окружения
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -19,15 +22,16 @@ if not DATABASE_URL:
 
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASS = os.getenv("ADMIN_PASS", "admin")
+if ADMIN_USER == "admin" and ADMIN_PASS == "admin":
+    logging.warning("Using default admin credentials! Change them via ADMIN_USER/ADMIN_PASS env vars.")
 
-# Подключение к БД через SQLAlchemy (синхронное, с psycopg2)
-# Преобразуем URL для SQLAlchemy (заменяем postgresql:// на postgresql+psycopg2://)
+# Подключение к БД
 SYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
 engine = create_engine(SYNC_DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-# Модели (должны совпадать с таблицами бота)
+# Модели
 class UserStyle(Base):
     __tablename__ = "user_styles"
     user_id = Column(BigInteger, primary_key=True)
@@ -48,11 +52,10 @@ class BlockedUser(Base):
     user_id = Column(BigInteger, primary_key=True)
     blocked_at = Column(String)
 
-# Создаём таблицы, если их нет
 Base.metadata.create_all(bind=engine)
 logging.info("Tables created/checked")
 
-# ========== АДМИН-ПРЕДСТАВЛЕНИЯ (SQLAdmin) ==========
+# Админ-представления
 class UserStyleAdmin(ModelView, model=UserStyle):
     column_list = [UserStyle.user_id, UserStyle.style]
     column_searchable_list = [UserStyle.user_id]
@@ -70,18 +73,39 @@ class BlockedUserAdmin(ModelView, model=BlockedUser):
     name = "Заблокированный"
     name_plural = "Заблокированные"
 
-# ========== FASTAPI ПРИЛОЖЕНИЕ ==========
+# FastAPI приложение
 app = FastAPI(title="Bot Admin Panel")
 
-# Подключаем админку (используем add_view, а не register_view)
+# Middleware для Basic Authentication
+class BasicAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        # Эндпоинты /health и / не требуют аутентификации (можно оставить открытыми)
+        if request.url.path in ["/health", "/"]:
+            return await call_next(request)
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Basic "):
+            return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
+        try:
+            encoded = auth_header.split(" ")[1]
+            decoded = base64.b64decode(encoded).decode("utf-8")
+            username, password = decoded.split(":", 1)
+            if username != ADMIN_USER or password != ADMIN_PASS:
+                return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
+        except:
+            return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
+        return await call_next(request)
+
+app.add_middleware(BasicAuthMiddleware)
+
+# Подключаем админку SQLAdmin
 admin = Admin(app, engine)
 admin.add_view(UserStyleAdmin)
 admin.add_view(MessageAdmin)
 admin.add_view(BlockedUserAdmin)
 
-# Эндпоинт для проверки работоспособности
+# Эндпоинт для проверки здоровья
 @app.get("/health")
 async def health():
     return {"status": "ok"}
 
-logging.info("Admin app initialized successfully")
+logging.info("Admin app with authentication initialized successfully")
