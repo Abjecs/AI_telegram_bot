@@ -1,80 +1,33 @@
 import os
 import sys
 import logging
+from fastapi import FastAPI
+from sqlalchemy import create_engine, Column, Integer, String, Text, BigInteger
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from sqladmin import Admin, ModelView
 
-# Настройка логирования в консоль (Render увидит)
+# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 logging.info("=== Starting admin_app.py ===")
-logging.info(f"Python version: {sys.version}")
-logging.info(f"Current directory: {os.getcwd()}")
-logging.info(f"Files in current dir: {os.listdir('.')}")
 
-# Проверяем переменные окружения
+# Переменные окружения
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     logging.error("DATABASE_URL not set!")
     sys.exit(1)
-else:
-    # Скрываем пароль для безопасности
-    masked = DATABASE_URL.split('@')[0].replace(DATABASE_URL.split(':')[2], '***') + '@' + DATABASE_URL.split('@')[1]
-    logging.info(f"DATABASE_URL found (masked): {masked}")
 
-ADMIN_USER = os.getenv("ADMIN_USER")
-ADMIN_PASS = os.getenv("ADMIN_PASS")
-if not ADMIN_USER or not ADMIN_PASS:
-    logging.warning("ADMIN_USER or ADMIN_PASS not set, using defaults")
-    ADMIN_USER = "admin"
-    ADMIN_PASS = "admin"
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "admin")
 
-# Пробуем импортировать необходимые библиотеки
-try:
-    logging.info("Importing fastapi...")
-    from fastapi import FastAPI
-    logging.info("FastAPI imported")
-except Exception as e:
-    logging.error(f"Failed to import fastapi: {e}")
-    sys.exit(1)
+# Подключение к БД через SQLAlchemy (синхронное, с psycopg2)
+# Преобразуем URL для SQLAlchemy (заменяем postgresql:// на postgresql+psycopg2://)
+SYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
+engine = create_engine(SYNC_DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine)
+Base = declarative_base()
 
-try:
-    logging.info("Importing sqlalchemy...")
-    from sqlalchemy import create_engine, Column, Integer, String, Text, BigInteger
-    from sqlalchemy.ext.declarative import declarative_base
-    from sqlalchemy.orm import sessionmaker
-    logging.info("SQLAlchemy imported")
-except Exception as e:
-    logging.error(f"Failed to import sqlalchemy: {e}")
-    sys.exit(1)
-
-try:
-    logging.info("Importing sqladmin...")
-    from sqladmin import Admin, ModelView
-    logging.info("SQLAdmin imported")
-except Exception as e:
-    logging.error(f"Failed to import sqladmin: {e}")
-    sys.exit(1)
-
-try:
-    logging.info("Importing psycopg2...")
-    import psycopg2
-    logging.info("psycopg2 imported")
-except Exception as e:
-    logging.error(f"Failed to import psycopg2 (psycopg2-binary?): {e}")
-    sys.exit(1)
-
-# Конвертируем DATABASE_URL для SQLAlchemy (синхронный драйвер)
-try:
-    SYNC_DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg2://")
-    logging.info(f"Creating engine for: {SYNC_DATABASE_URL.split('@')[0].split(':')[0]}://...")
-    engine = create_engine(SYNC_DATABASE_URL)
-    SessionLocal = sessionmaker(bind=engine)
-    Base = declarative_base()
-    logging.info("Engine created")
-except Exception as e:
-    logging.error(f"Failed to create engine: {e}")
-    sys.exit(1)
-
-# Определяем модели (должны совпадать с ботом)
+# Модели (должны совпадать с таблицами бота)
 class UserStyle(Base):
     __tablename__ = "user_styles"
     user_id = Column(BigInteger, primary_key=True)
@@ -95,15 +48,11 @@ class BlockedUser(Base):
     user_id = Column(BigInteger, primary_key=True)
     blocked_at = Column(String)
 
-# Создаём таблицы (если нет)
-try:
-    Base.metadata.create_all(bind=engine)
-    logging.info("Tables created/checked")
-except Exception as e:
-    logging.error(f"Failed to create tables: {e}")
-    sys.exit(1)
+# Создаём таблицы, если их нет
+Base.metadata.create_all(bind=engine)
+logging.info("Tables created/checked")
 
-# Админ-представления
+# ========== АДМИН-ПРЕДСТАВЛЕНИЯ (SQLAdmin) ==========
 class UserStyleAdmin(ModelView, model=UserStyle):
     column_list = [UserStyle.user_id, UserStyle.style]
     column_searchable_list = [UserStyle.user_id]
@@ -121,14 +70,16 @@ class BlockedUserAdmin(ModelView, model=BlockedUser):
     name = "Заблокированный"
     name_plural = "Заблокированные"
 
-# FastAPI приложение
-app = FastAPI(title="Bot Admin")
-admin = Admin(app, engine)
-admin.register_view(UserStyleAdmin)
-admin.register_view(MessageAdmin)
-admin.register_view(BlockedUserAdmin)
+# ========== FASTAPI ПРИЛОЖЕНИЕ ==========
+app = FastAPI(title="Bot Admin Panel")
 
-# Простой эндпоинт для проверки
+# Подключаем админку (используем add_view, а не register_view)
+admin = Admin(app, engine)
+admin.add_view(UserStyleAdmin)
+admin.add_view(MessageAdmin)
+admin.add_view(BlockedUserAdmin)
+
+# Эндпоинт для проверки работоспособности
 @app.get("/health")
 async def health():
     return {"status": "ok"}
