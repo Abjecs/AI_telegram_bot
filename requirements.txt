@@ -2,3 +2,9 @@ python-telegram-bot
 gigachat
 aiohttp
 asyncpg
+fastapi
+uvicorn
+sqladmin
+sqlalchemy
+psycopg2-binary
+jinja2
