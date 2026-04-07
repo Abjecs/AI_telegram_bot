@@ -36,6 +36,7 @@ class UserStyle(Base):
     __tablename__ = "user_styles"
     user_id = Column(BigInteger, primary_key=True)
     style = Column(String, default="standart")
+    role = Column(String, default="test")   # <--- добавлено поле role
 
 class Message(Base):
     __tablename__ = "messages"
@@ -57,8 +58,9 @@ logging.info("Tables created/checked")
 
 # Админ-представления
 class UserStyleAdmin(ModelView, model=UserStyle):
-    column_list = [UserStyle.user_id, UserStyle.style]
+    column_list = [UserStyle.user_id, UserStyle.style, UserStyle.role]   # <--- добавлена колонка role
     column_searchable_list = [UserStyle.user_id]
+    column_sortable_list = [UserStyle.user_id, UserStyle.role]
     name = "Пользователь"
     name_plural = "Пользователи"
 
@@ -79,7 +81,6 @@ app = FastAPI(title="Bot Admin Panel")
 # Middleware для Basic Authentication
 class BasicAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
-        # Эндпоинты /health и / не требуют аутентификации (можно оставить открытыми)
         if request.url.path in ["/health", "/"]:
             return await call_next(request)
         auth_header = request.headers.get("Authorization")
