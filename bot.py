@@ -38,14 +38,16 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
-        # Таблица user_styles (с ролью)
+        # Таблица user_styles (с ролью и языком)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_styles (
                 user_id BIGINT PRIMARY KEY,
                 style TEXT DEFAULT 'standart',
-                role TEXT DEFAULT 'test'
+                role TEXT DEFAULT 'test',
+                target_lang TEXT DEFAULT 'RU'
             )
         ''')
+        # Добавляем колонку role, если её нет
         await conn.execute('''
             DO $$
             BEGIN
@@ -53,10 +55,14 @@ async def init_db():
                                WHERE table_name='user_styles' AND column_name='role') THEN
                     ALTER TABLE user_styles ADD COLUMN role TEXT DEFAULT 'test';
                 END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                               WHERE table_name='user_styles' AND column_name='target_lang') THEN
+                    ALTER TABLE user_styles ADD COLUMN target_lang TEXT DEFAULT 'RU';
+                END IF;
             END
             $$;
         ''')
-        # Таблица messages
+        # Таблица сообщений
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -68,7 +74,7 @@ async def init_db():
                 timestamp TEXT
             )
         ''')
-        # Таблица reminders (напоминания)
+        # Таблица напоминаний
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS reminders (
                 id SERIAL PRIMARY KEY,
@@ -78,7 +84,7 @@ async def init_db():
                 status TEXT DEFAULT 'active'
             )
         ''')
-        # Остальные миграции
+        # Миграции для messages
         columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name='messages'")
         existing = [c['column_name'] for c in columns]
         if 'username' not in existing:
@@ -91,7 +97,7 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-    logging.info("База данных инициализирована (включая таблицу reminders)")
+    logging.info("База данных инициализирована (роли, напоминания, язык)")
 
 # ==================== РОЛИ ====================
 async def get_user_role(user_id: int) -> str:
@@ -137,10 +143,8 @@ async def save_message(user_id, username, user_message, bot_reply, style_used):
 
 # ==================== НАПОМИНАНИЯ ====================
 def parse_remind_time(time_str: str) -> datetime:
-    """Парсит время: '2025-12-31 23:59' или '+1h', '+30m', '+2d'."""
     now = datetime.now()
     if time_str.startswith('+'):
-        # относительное время: +1h, +30m, +2d
         num = int(time_str[1:-1])
         unit = time_str[-1]
         if unit == 'h':
@@ -152,11 +156,7 @@ def parse_remind_time(time_str: str) -> datetime:
         else:
             raise ValueError("Формат: +<число>h/m/d")
     else:
-        # абсолютное время: YYYY-MM-DD HH:MM
-        try:
-            return datetime.strptime(time_str, "%Y-%m-%d %H:%M")
-        except:
-            raise ValueError("Неверный формат. Используйте 'YYYY-MM-DD HH:MM' или '+1h'")
+        return datetime.strptime(time_str, "%Y-%m-%d %H:%M")
 
 async def add_reminder(user_id: int, remind_at: datetime, text: str):
     async with db_pool.acquire() as conn:
@@ -173,31 +173,106 @@ async def delete_reminder(reminder_id: int, user_id: int):
         await conn.execute("UPDATE reminders SET status = 'deleted' WHERE id = $1 AND user_id = $2", reminder_id, user_id)
 
 async def check_reminders():
-    """Фоновая задача: каждую минуту проверяет и отправляет напоминания."""
     while True:
         await asyncio.sleep(60)
         try:
             async with db_pool.acquire() as conn:
                 rows = await conn.fetch("SELECT id, user_id, text FROM reminders WHERE status = 'active' AND remind_at <= NOW()")
                 for row in rows:
-                    # Отправляем сообщение пользователю
                     try:
                         await bot_app.bot.send_message(chat_id=row["user_id"], text=f"🔔 Напоминание: {row['text']}")
                     except Exception as e:
                         logging.error(f"Не удалось отправить напоминание {row['id']}: {e}")
-                    # Помечаем как отправленное
                     await conn.execute("UPDATE reminders SET status = 'sent' WHERE id = $1", row["id"])
         except Exception as e:
             logging.error(f"Ошибка в check_reminders: {e}")
 
-# ==================== КОМАНДЫ ====================
+# ==================== ПЕРЕВОДЧИК (GigaChat) ====================
+async def get_user_target_lang(user_id: int) -> str:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT target_lang FROM user_styles WHERE user_id = $1", user_id)
+        if row and row["target_lang"]:
+            return row["target_lang"]
+        return "RU"
+
+async def set_user_target_lang(user_id: int, lang: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE user_styles SET target_lang = $1 WHERE user_id = $2", lang, user_id)
+
+async def translate_text_via_gigachat(text: str, target_lang: str) -> str:
+    try:
+        async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+            messages = [
+                {"role": "system", "content": f"Ты — переводчик. Переведи следующий текст на язык {target_lang}. Отвечай только переводом, без пояснений."},
+                {"role": "user", "content": text}
+            ]
+            payload = {"messages": messages}
+            response = await giga.achat(payload)
+            return response.choices[0].message.content
+    except Exception as e:
+        logging.error(f"Translation error: {e}")
+        return "❌ Ошибка перевода."
+
+async def translate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /translate <текст> или /tr <ru|en|de> <текст>")
+        return
+    target_lang = None
+    text_start = 0
+    lang_code = context.args[0].upper()
+    if lang_code in ["RU", "EN", "DE", "FR", "ES", "IT", "NL", "PL", "PT", "ZH", "JA"]:
+        target_lang = lang_code
+        text_start = 1
+    if not target_lang:
+        target_lang = await get_user_target_lang(update.effective_user.id)
+    text = " ".join(context.args[text_start:])
+    if not text:
+        await update.message.reply_text("Вы не указали текст для перевода.")
+        return
+    await update.message.reply_text("🔄 Перевод...")
+    translated = await translate_text_via_gigachat(text, target_lang)
+    await update.message.reply_text(f"📝 Перевод ({target_lang}):\n{translated}")
+
+async def set_lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /lang ru (доступны: ru, en, de, fr, es, it, nl, pl, pt, zh, ja)")
+        return
+    lang = context.args[0].upper()
+    allowed = ["RU", "EN", "DE", "FR", "ES", "IT", "NL", "PL", "PT", "ZH", "JA"]
+    if lang not in allowed:
+        await update.message.reply_text(f"Неподдерживаемый язык. Доступны: {', '.join(allowed)}")
+        return
+    await set_user_target_lang(update.effective_user.id, lang)
+    await update.message.reply_text(f"✅ Язык перевода по умолчанию установлен: {lang}")
+
+async def explain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /explain <слово или фраза>")
+        return
+    text = " ".join(context.args)
+    await update.message.reply_text("🔍 Ищу объяснение...")
+    try:
+        async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+            messages = [
+                {"role": "system", "content": "Ты — языковой помощник. Объясни значение слова или фразы кратко и понятно. Если слово многозначное, приведи 1-2 примера."},
+                {"role": "user", "content": text}
+            ]
+            payload = {"messages": messages}
+            response = await giga.achat(payload)
+            explanation = response.choices[0].message.content
+            await update.message.reply_text(f"📖 Объяснение:\n{explanation}")
+    except Exception as e:
+        logging.error(f"Explain error: {e}")
+        await update.message.reply_text("❌ Ошибка при получении объяснения.")
+
+# ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     style = await get_user_style(update.effective_user.id)
     role = await get_user_role(update.effective_user.id)
     await update.message.reply_text(
         f"Привет! Твой стиль: {STYLES[style]['name']}. Роль: {role}.\n"
         f"Используй /style для смены стиля, /help для справки.\n"
-        f"Новые команды: /remind, /myreminds, /delremind"
+        f"Новые команды: /remind, /myreminds, /delremind, /translate, /explain, /lang"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -207,9 +282,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help — справка\n"
         "/style — выбрать стиль\n"
         "/auth — авторизация\n"
-        "/remind <время> <текст> — создать напоминание\n"
+        "/remind <время> <текст> — напоминание\n"
         "/myreminds — список напоминаний\n"
-        "/delremind <id> — удалить напоминание\n\n"
+        "/delremind <id> — удалить напоминание\n"
+        "/translate <текст> или /tr <ru|en> <текст> — перевод\n"
+        "/lang <ru|en|de|...> — язык перевода по умолчанию\n"
+        "/explain <слово> — объяснить слово/фразу\n\n"
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
     if role == "admin":
@@ -426,6 +504,10 @@ async def main():
     bot_app.add_handler(CommandHandler("remind", remind_command))
     bot_app.add_handler(CommandHandler("myreminds", myreminds_command))
     bot_app.add_handler(CommandHandler("delremind", delremind_command))
+    bot_app.add_handler(CommandHandler("translate", translate_command))
+    bot_app.add_handler(CommandHandler("tr", translate_command))
+    bot_app.add_handler(CommandHandler("lang", set_lang_command))
+    bot_app.add_handler(CommandHandler("explain", explain_command))
     bot_app.add_handler(CommandHandler("style", style_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     bot_app.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
@@ -444,7 +526,6 @@ async def main():
     await bot_app.bot.set_webhook(webhook_url)
     logging.info(f"Вебхук: {webhook_url}")
 
-    # Запускаем фоновую задачу для напоминаний
     asyncio.create_task(check_reminders())
 
     app = web.Application()
