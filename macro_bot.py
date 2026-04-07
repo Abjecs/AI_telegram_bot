@@ -1,11 +1,16 @@
 import asyncio
 import logging
+import os
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
-TOKEN = "YOUR_MACRO_BOT_TOKEN"      # токен короткого бота
-TARGET_BOT_USERNAME = "Abjecs_bot"  # юзернейм основного бота (без @)
-PREFIX = "Кай"                     # команда-триггер
+# Читаем токен из переменной окружения
+TOKEN = os.getenv("MACRO_BOT_TOKEN")   # имя переменной должно совпадать с тем, что вы задали в Render
+TARGET_BOT_USERNAME = "Abjecs_bot"    # юзернейм основного бота (без @)
+PREFIX = "Кай"                         # триггерное слово (русскими буквами)
+
+if not TOKEN:
+    raise ValueError("Переменная окружения MACRO_BOT_TOKEN не установлена!")
 
 logging.basicConfig(level=logging.INFO)
 
@@ -15,12 +20,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.message.text.strip()
     if text.startswith(PREFIX):
-        # Извлекаем текст после префикса
         query = text[len(PREFIX):].strip()
         if not query:
-            await update.message.reply_text("Напишите что-нибудь после !бот")
+            await update.message.reply_text("Напишите что-нибудь после команды")
             return
-        # Отправляем в тот же чат упоминание основного бота
+        # Отправляем упоминание основного бота
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"@{TARGET_BOT_USERNAME} {query}"
