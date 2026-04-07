@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import traceback
+import hashlib
+import aiohttp
 from datetime import datetime, timedelta
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -14,6 +16,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
 DATABASE_URL = os.getenv("DATABASE_URL")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "default123")
+NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+TGSTAT_TOKEN = os.getenv("TGSTAT_API_TOKEN", "")
 PORT = int(os.environ.get("PORT", 8080))
 
 if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
@@ -38,7 +42,6 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
-        # Таблица user_styles (с ролью и языком)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_styles (
                 user_id BIGINT PRIMARY KEY,
@@ -47,7 +50,6 @@ async def init_db():
                 target_lang TEXT DEFAULT 'RU'
             )
         ''')
-        # Добавляем колонку role, если её нет
         await conn.execute('''
             DO $$
             BEGIN
@@ -62,7 +64,6 @@ async def init_db():
             END
             $$;
         ''')
-        # Таблица сообщений
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -74,7 +75,6 @@ async def init_db():
                 timestamp TEXT
             )
         ''')
-        # Таблица напоминаний
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS reminders (
                 id SERIAL PRIMARY KEY,
@@ -84,7 +84,16 @@ async def init_db():
                 status TEXT DEFAULT 'active'
             )
         ''')
-        # Миграции для messages
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS search_cache (
+                id SERIAL PRIMARY KEY,
+                query_hash TEXT UNIQUE,
+                query_type TEXT,
+                query_text TEXT,
+                result TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
         columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name='messages'")
         existing = [c['column_name'] for c in columns]
         if 'username' not in existing:
@@ -97,7 +106,7 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-    logging.info("База данных инициализирована (роли, напоминания, язык)")
+    logging.info("База данных инициализирована")
 
 # ==================== РОЛИ ====================
 async def get_user_role(user_id: int) -> str:
@@ -187,7 +196,7 @@ async def check_reminders():
         except Exception as e:
             logging.error(f"Ошибка в check_reminders: {e}")
 
-# ==================== ПЕРЕВОДЧИК (GigaChat) ====================
+# ==================== ПЕРЕВОДЧИК ====================
 async def get_user_target_lang(user_id: int) -> str:
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT target_lang FROM user_styles WHERE user_id = $1", user_id)
@@ -265,6 +274,114 @@ async def explain_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Explain error: {e}")
         await update.message.reply_text("❌ Ошибка при получении объяснения.")
 
+# ==================== ПОИСК (НОВОСТИ, TELEGRAM) ====================
+def get_query_hash(query_type: str, query_text: str) -> str:
+    text = f"{query_type}:{query_text}".lower()
+    return hashlib.md5(text.encode()).hexdigest()
+
+async def get_cached_result(query_hash: str) -> str | None:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT result FROM search_cache WHERE query_hash = $1 AND created_at > NOW() - INTERVAL '6 hours'", query_hash)
+        if row:
+            return row["result"]
+        return None
+
+async def save_cached_result(query_hash: str, query_type: str, query_text: str, result: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO search_cache (query_hash, query_type, query_text, result) VALUES ($1, $2, $3, $4) ON CONFLICT (query_hash) DO UPDATE SET result = $4, created_at = NOW()",
+                           query_hash, query_type, query_text, result)
+
+async def fetch_news(query: str) -> str:
+    if not NEWS_API_KEY:
+        return "❌ NewsAPI ключ не настроен."
+    qhash = get_query_hash("news", query)
+    cached = await get_cached_result(qhash)
+    if cached:
+        return cached
+    url = "https://newsapi.org/v2/everything"
+    params = {
+        "q": query,
+        "apiKey": NEWS_API_KEY,
+        "language": "ru",
+        "pageSize": 5,
+        "sortBy": "publishedAt"
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return f"❌ Ошибка NewsAPI: {resp.status}"
+                data = await resp.json()
+                if data.get("status") != "ok":
+                    return f"❌ Ошибка: {data.get('message', 'Unknown error')}"
+                articles = data.get("articles", [])
+                if not articles:
+                    return "Новостей не найдено."
+                result = f"📰 Новости по запросу '{query}':\n\n"
+                for i, art in enumerate(articles[:5], 1):
+                    title = art.get("title", "Без заголовка")
+                    link = art.get("url", "#")
+                    published = art.get("publishedAt", "")[:10]
+                    result += f"{i}. [{title}]({link}) – {published}\n"
+                await save_cached_result(qhash, "news", query, result)
+                return result
+        except Exception as e:
+            logging.error(f"NewsAPI error: {e}")
+            return "❌ Ошибка при получении новостей."
+
+async def news_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /news <запрос>")
+        return
+    query = " ".join(context.args)
+    await update.message.reply_text("🔍 Ищу новости...")
+    result = await fetch_news(query)
+    await update.message.reply_text(result, parse_mode="Markdown", disable_web_page_preview=True)
+
+async def tgsearch(query: str) -> str:
+    if not TGSTAT_TOKEN:
+        return "❌ TGStat API токен не настроен."
+    qhash = get_query_hash("tgsearch", query)
+    cached = await get_cached_result(qhash)
+    if cached:
+        return cached
+    url = "https://api.tgstat.ru/search"
+    params = {
+        "token": TGSTAT_TOKEN,
+        "query": query,
+        "limit": 5
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return f"❌ Ошибка TGStat: {resp.status}"
+                data = await resp.json()
+                if data.get("response") is None:
+                    return f"❌ Ошибка: {data.get('error', 'Unknown error')}"
+                items = data.get("response", {}).get("items", [])
+                if not items:
+                    return "Постов не найдено."
+                result = f"📢 Результаты поиска в Telegram по запросу '{query}':\n\n"
+                for i, item in enumerate(items[:5], 1):
+                    title = item.get("title", "Без названия")
+                    link = item.get("link", "#")
+                    result += f"{i}. [{title}]({link})\n"
+                await save_cached_result(qhash, "tgsearch", query, result)
+                return result
+        except Exception as e:
+            logging.error(f"TGStat error: {e}")
+            return "❌ Ошибка при поиске в Telegram."
+
+async def tgsearch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /tgsearch <запрос>")
+        return
+    query = " ".join(context.args)
+    await update.message.reply_text("🔍 Ищу в Telegram...")
+    result = await tgsearch(query)
+    await update.message.reply_text(result, parse_mode="Markdown", disable_web_page_preview=True)
+
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     style = await get_user_style(update.effective_user.id)
@@ -272,7 +389,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Привет! Твой стиль: {STYLES[style]['name']}. Роль: {role}.\n"
         f"Используй /style для смены стиля, /help для справки.\n"
-        f"Новые команды: /remind, /myreminds, /delremind, /translate, /explain, /lang"
+        f"Новые команды: /remind, /myreminds, /delremind, /translate, /explain, /lang, /news, /tgsearch"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -287,7 +404,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/delremind <id> — удалить напоминание\n"
         "/translate <текст> или /tr <ru|en> <текст> — перевод\n"
         "/lang <ru|en|de|...> — язык перевода по умолчанию\n"
-        "/explain <слово> — объяснить слово/фразу\n\n"
+        "/explain <слово> — объяснить слово/фразу\n"
+        "/news <запрос> — новости\n"
+        "/tgsearch <запрос> — поиск в Telegram\n\n"
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
     if role == "admin":
@@ -508,6 +627,8 @@ async def main():
     bot_app.add_handler(CommandHandler("tr", translate_command))
     bot_app.add_handler(CommandHandler("lang", set_lang_command))
     bot_app.add_handler(CommandHandler("explain", explain_command))
+    bot_app.add_handler(CommandHandler("news", news_command))
+    bot_app.add_handler(CommandHandler("tgsearch", tgsearch_command))
     bot_app.add_handler(CommandHandler("style", style_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     bot_app.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
