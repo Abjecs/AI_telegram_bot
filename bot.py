@@ -18,7 +18,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "default123")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 TGSTAT_TOKEN = os.getenv("TGSTAT_API_TOKEN", "")
-STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID")  # ID канала для хранения файлов
+STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID")
 PORT = int(os.environ.get("PORT", 8080))
 
 if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
@@ -536,8 +536,12 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        # Пересылаем файл в канал (используем copy_message, он работает с каналами)
-        sent = await update.message.copy(chat_id=STORAGE_CHANNEL_ID)
+        # Пересылаем файл в канал
+        sent = await context.bot.copy_message(
+            chat_id=STORAGE_CHANNEL_ID,
+            from_chat_id=update.effective_chat.id,
+            message_id=update.message.message_id
+        )
         # Получаем file_id из пересланного сообщения
         if sent.document:
             new_file_id = sent.document.file_id
@@ -979,15 +983,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     username = update.effective_user.username or "NoUsername"
 
-    # Если это файл в личной переписке – обрабатываем загрузку (даже если нет текста)
+    # Личные сообщения: сначала обрабатываем файлы
     if chat_type == "private":
         if update.message.document or update.message.photo or update.message.video:
             await handle_file_upload(update, context)
             return
-        # Если нет текста и не файл – игнорируем
         if not user_message:
             return
-        # Личные текстовые сообщения – обычный ответ
+        # Обычный текст в личке
         style_key = await get_user_style(user_id)
         style_prompt = STYLES[style_key]["prompt"]
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -1010,14 +1013,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Групповая логика
     if chat_type in ["group", "supergroup"]:
         group_id = update.effective_chat.id
-        # Сохраняем сообщение (даже если без текста – сохраняем пометку)
+        # Сохраняем сообщение
         await save_group_message(group_id, user_id, username, user_message or "(медиа)")
 
         settings = await get_group_settings(group_id)
         if settings["count_messages"]:
             await increment_message_count(group_id, user_id)
 
-        # Триггеры (только если есть текст)
+        # Триггеры
         if user_message:
             triggers = await get_triggers(group_id)
             for t in triggers:
@@ -1065,7 +1068,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logging.error(f"Ошибка GigaChat при упоминании: {e}")
                 return
-        # Если сообщение без текста (например, стикер, гифка) – не отвечаем
         return
 
 # ==================== АВТООЧИСТКА ГРУППОВОЙ ИСТОРИИ ====================
