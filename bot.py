@@ -42,6 +42,7 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
+        # Таблица user_styles
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_styles (
                 user_id BIGINT PRIMARY KEY,
@@ -64,6 +65,7 @@ async def init_db():
             END
             $$;
         ''')
+        # Таблица сообщений (личные)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -75,6 +77,7 @@ async def init_db():
                 timestamp TEXT
             )
         ''')
+        # Таблица напоминаний
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS reminders (
                 id SERIAL PRIMARY KEY,
@@ -84,6 +87,7 @@ async def init_db():
                 status TEXT DEFAULT 'active'
             )
         ''')
+        # Таблица кэша поиска
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS search_cache (
                 id SERIAL PRIMARY KEY,
@@ -94,6 +98,47 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         ''')
+        # Таблицы для групп
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS group_settings (
+                group_id BIGINT PRIMARY KEY,
+                welcome_message TEXT,
+                farewell_message TEXT,
+                count_messages BOOLEAN DEFAULT TRUE,
+                cleanup_days INT DEFAULT 30   -- автоочистка сообщений группы через N дней
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS triggers (
+                id SERIAL PRIMARY KEY,
+                group_id BIGINT,
+                keyword TEXT,
+                response TEXT,
+                created_by BIGINT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS group_stats (
+                group_id BIGINT,
+                user_id BIGINT,
+                message_count INT DEFAULT 0,
+                last_active TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (group_id, user_id)
+            )
+        ''')
+        # Новая таблица для хранения истории сообщений группы
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS group_messages (
+                id SERIAL PRIMARY KEY,
+                group_id BIGINT,
+                user_id BIGINT,
+                username TEXT,
+                message TEXT,
+                timestamp TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        # Миграции для messages
         columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name='messages'")
         existing = [c['column_name'] for c in columns]
         if 'username' not in existing:
@@ -106,7 +151,7 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-    logging.info("База данных инициализирована")
+    logging.info("База данных инициализирована (включая групповую историю и автоочистку)")
 
 # ==================== РОЛИ ====================
 async def get_user_role(user_id: int) -> str:
@@ -382,14 +427,177 @@ async def tgsearch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await tgsearch(query)
     await update.message.reply_text(result, parse_mode="Markdown", disable_web_page_preview=True)
 
+# ==================== ГРУППОВЫЕ ФУНКЦИИ (расширенные) ====================
+async def get_group_settings(group_id: int):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT welcome_message, farewell_message, count_messages, cleanup_days FROM group_settings WHERE group_id = $1", group_id)
+        if row:
+            return dict(row)
+        return {"welcome_message": None, "farewell_message": None, "count_messages": True, "cleanup_days": 30}
+
+async def set_group_settings(group_id: int, welcome: str = None, farewell: str = None, count_messages: bool = None, cleanup_days: int = None):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO group_settings (group_id, welcome_message, farewell_message, count_messages, cleanup_days) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (group_id) DO UPDATE SET welcome_message = COALESCE($2, group_settings.welcome_message), farewell_message = COALESCE($3, group_settings.farewell_message), count_messages = COALESCE($4, group_settings.count_messages), cleanup_days = COALESCE($5, group_settings.cleanup_days)",
+                           group_id, welcome, farewell, count_messages, cleanup_days)
+
+async def add_trigger(group_id: int, keyword: str, response: str, user_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO triggers (group_id, keyword, response, created_by) VALUES ($1, $2, $3, $4)", group_id, keyword.lower(), response, user_id)
+
+async def get_triggers(group_id: int):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT id, keyword, response FROM triggers WHERE group_id = $1", group_id)
+        return rows
+
+async def delete_trigger(trigger_id: int, group_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM triggers WHERE id = $1 AND group_id = $2", trigger_id, group_id)
+
+async def increment_message_count(group_id: int, user_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO group_stats (group_id, user_id, message_count, last_active) VALUES ($1, $2, 1, NOW()) ON CONFLICT (group_id, user_id) DO UPDATE SET message_count = group_stats.message_count + 1, last_active = NOW()", group_id, user_id)
+
+async def get_group_stats(group_id: int, limit: int = 10):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, message_count, last_active FROM group_stats WHERE group_id = $1 ORDER BY message_count DESC LIMIT $2", group_id, limit)
+        return rows
+
+async def save_group_message(group_id: int, user_id: int, username: str, message: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO group_messages (group_id, user_id, username, message) VALUES ($1, $2, $3, $4)", group_id, user_id, username, message)
+
+async def get_group_history(group_id: int, limit: int = 20):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id, username, message, timestamp FROM group_messages WHERE group_id = $1 ORDER BY timestamp DESC LIMIT $2", group_id, limit)
+        return rows[::-1]  # в хронологическом порядке
+
+async def cleanup_old_group_messages(group_id: int, days: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - INTERVAL '$2 days'", group_id, days)
+
+async def is_group_admin(update: Update, user_id: int) -> bool:
+    chat_member = await update.effective_chat.get_member(user_id)
+    return chat_member.status in ["administrator", "creator"]
+
+# Команды для настройки группы
+async def set_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("Эта команда работает только в группах.")
+        return
+    if not await is_group_admin(update, update.effective_user.id):
+        await update.message.reply_text("⛔ Только администраторы группы могут использовать эту команду.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /setwelcome <текст приветствия>\nИспользуйте {name} для подстановки имени пользователя.")
+        return
+    welcome = " ".join(context.args)
+    await set_group_settings(update.effective_chat.id, welcome=welcome)
+    await update.message.reply_text("✅ Приветствие установлено.")
+
+async def set_cleanup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("Эта команда работает только в группах.")
+        return
+    if not await is_group_admin(update, update.effective_user.id):
+        await update.message.reply_text("⛔ Только администраторы группы могут настраивать автоочистку.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /set_cleanup <дни>\nПример: /set_cleanup 7 (удалять сообщения старше 7 дней)")
+        return
+    try:
+        days = int(context.args[0])
+        if days < 1:
+            await update.message.reply_text("Количество дней должно быть больше 0.")
+            return
+        await set_group_settings(update.effective_chat.id, cleanup_days=days)
+        await update.message.reply_text(f"✅ Автоочистка установлена: сообщения группы старше {days} дней будут удаляться автоматически.")
+    except:
+        await update.message.reply_text("Ошибка: укажите число дней.")
+
+async def add_trigger_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("Эта команда работает только в группах.")
+        return
+    if not await is_group_admin(update, update.effective_user.id):
+        await update.message.reply_text("⛔ Только администраторы группы могут добавлять триггеры.")
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /addtrigger <ключевое слово> <ответ>")
+        return
+    keyword = context.args[0].lower()
+    response = " ".join(context.args[1:])
+    await add_trigger(update.effective_chat.id, keyword, response, update.effective_user.id)
+    await update.message.reply_text(f"✅ Триггер добавлен: при слове '{keyword}' буду отвечать '{response}'")
+
+async def list_triggers_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("Эта команда работает только в группах.")
+        return
+    triggers = await get_triggers(update.effective_chat.id)
+    if not triggers:
+        await update.message.reply_text("В этой группе нет триггеров.")
+        return
+    text = "📋 Список триггеров:\n"
+    for t in triggers:
+        text += f"ID {t['id']}: {t['keyword']} → {t['response'][:50]}\n"
+    await update.message.reply_text(text)
+
+async def del_trigger_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("Эта команда работает только в группах.")
+        return
+    if not await is_group_admin(update, update.effective_user.id):
+        await update.message.reply_text("⛔ Только администраторы группы могут удалять триггеры.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /deltrigger <id>")
+        return
+    try:
+        tid = int(context.args[0])
+        await delete_trigger(tid, update.effective_chat.id)
+        await update.message.reply_text(f"✅ Триггер {tid} удалён.")
+    except:
+        await update.message.reply_text("Ошибка: укажите корректный ID.")
+
+async def group_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("Эта команда работает только в группах.")
+        return
+    if not await is_group_admin(update, update.effective_user.id):
+        await update.message.reply_text("⛔ Только администраторы группы могут смотреть статистику.")
+        return
+    stats = await get_group_stats(update.effective_chat.id)
+    if not stats:
+        await update.message.reply_text("Статистики пока нет.")
+        return
+    text = "📊 Статистика группы:\n"
+    for row in stats:
+        text += f"👤 {row['user_id']}: {row['message_count']} сообщений, последняя активность {row['last_active'].strftime('%Y-%m-%d %H:%M')}\n"
+    await update.message.reply_text(text)
+
+async def group_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type not in ["group", "supergroup"]:
+        await update.message.reply_text("Эта команда работает только в группах.")
+        return
+    if not await is_group_admin(update, update.effective_user.id):
+        await update.message.reply_text("⛔ Только администраторы группы могут просматривать историю.")
+        return
+    history = await get_group_history(update.effective_chat.id, limit=20)
+    if not history:
+        await update.message.reply_text("История сообщений пуста.")
+        return
+    text = "📜 Последние сообщения группы:\n"
+    for msg in history:
+        text += f"{msg['username'] or msg['user_id']}: {msg['message'][:100]}\n"
+    await update.message.reply_text(text)
+
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     style = await get_user_style(update.effective_user.id)
     role = await get_user_role(update.effective_user.id)
     await update.message.reply_text(
         f"Привет! Твой стиль: {STYLES[style]['name']}. Роль: {role}.\n"
-        f"Используй /style для смены стиля, /help для справки.\n"
-        f"Новые команды: /remind, /myreminds, /delremind, /translate, /explain, /lang, /news, /tgsearch"
+        f"Используй /help для справки."
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -407,6 +615,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/explain <слово> — объяснить слово/фразу\n"
         "/news <запрос> — новости\n"
         "/tgsearch <запрос> — поиск в Telegram\n\n"
+        "Групповые команды (для админов групп):\n"
+        "/setwelcome <текст> — приветствие\n"
+        "/set_cleanup <дни> — автоочистка истории сообщений\n"
+        "/addtrigger <слово> <ответ> — триггер\n"
+        "/triggers — список триггеров\n"
+        "/deltrigger <id> — удалить триггер\n"
+        "/groupstats — статистика активности\n"
+        "/group_history — последние 20 сообщений группы\n\n"
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
     if role == "admin":
@@ -578,8 +794,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if role == "banned":
         await update.message.reply_text("⛔ Вы заблокированы и не можете использовать бота.")
         return
+
+    chat_type = update.effective_chat.type
     user_message = update.message.text
     username = update.effective_user.username or "NoUsername"
+
+    # Групповая логика
+    if chat_type in ["group", "supergroup"]:
+        group_id = update.effective_chat.id
+        # Сохраняем сообщение в историю группы
+        await save_group_message(group_id, user_id, username, user_message)
+
+        # Статистика сообщений (если включена)
+        settings = await get_group_settings(group_id)
+        if settings["count_messages"]:
+            await increment_message_count(group_id, user_id)
+
+        # Проверка триггеров
+        triggers = await get_triggers(group_id)
+        for t in triggers:
+            if t["keyword"] in user_message.lower():
+                await update.message.reply_text(t["response"])
+                return
+
+        # Проверка упоминания бота
+        bot_username = (await context.bot.get_me()).username
+        mention = f"@{bot_username}"
+        reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
+        if mention in user_message or reply_to_bot:
+            # Получаем последние 10 сообщений группы для контекста
+            history = await get_group_history(group_id, limit=10)
+            context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history])
+            # Формируем запрос к GigaChat с учётом контекста
+            prompt = f"Ты — помощник в Telegram-группе. Вот история последних сообщений (для контекста):\n{context_text}\n\nТеперь ответь на сообщение пользователя {username}: {user_message}"
+            try:
+                async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+                    messages = [
+                        {"role": "system", "content": "Ты — полезный бот. Отвечай кратко, дружелюбно, с учётом истории чата."},
+                        {"role": "user", "content": prompt}
+                    ]
+                    payload = {"messages": messages}
+                    response = await giga.achat(payload)
+                    ai_reply = response.choices[0].message.content
+                    await update.message.reply_text(ai_reply)
+            except Exception as e:
+                logging.error(f"Ошибка GigaChat в группе: {e}")
+                await update.message.reply_text("❌ Ошибка при генерации ответа.")
+            return
+        # На остальные сообщения в группе не отвечаем
+        return
+
+    # Личные сообщения
     style_key = await get_user_style(user_id)
     style_prompt = STYLES[style_key]["prompt"]
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -597,6 +862,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Ошибка GigaChat: {e}")
         await update.message.reply_text("❌ Ошибка при обращении к GigaChat. Попробуйте позже.")
+
+# ==================== АВТООЧИСТКА ГРУППОВОЙ ИСТОРИИ (фоновая задача) ====================
+async def cleanup_group_messages_job():
+    while True:
+        await asyncio.sleep(3600)  # раз в час
+        try:
+            async with db_pool.acquire() as conn:
+                groups = await conn.fetch("SELECT group_id, cleanup_days FROM group_settings WHERE cleanup_days IS NOT NULL")
+                for g in groups:
+                    days = g["cleanup_days"]
+                    await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - INTERVAL '$2 days'", g["group_id"], days)
+                    logging.info(f"Очистка группы {g['group_id']}: удалены сообщения старше {days} дней")
+        except Exception as e:
+            logging.error(f"Ошибка автоочистки: {e}")
 
 # ==================== WEBHOOK И HTTP ====================
 async def handle_webhook(request):
@@ -632,6 +911,14 @@ async def main():
     bot_app.add_handler(CommandHandler("style", style_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     bot_app.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
+    # Групповые команды
+    bot_app.add_handler(CommandHandler("setwelcome", set_welcome))
+    bot_app.add_handler(CommandHandler("set_cleanup", set_cleanup))
+    bot_app.add_handler(CommandHandler("addtrigger", add_trigger_command))
+    bot_app.add_handler(CommandHandler("triggers", list_triggers_command))
+    bot_app.add_handler(CommandHandler("deltrigger", del_trigger_command))
+    bot_app.add_handler(CommandHandler("groupstats", group_stats_command))
+    bot_app.add_handler(CommandHandler("group_history", group_history_command))
     # Админ-команды
     bot_app.add_handler(CommandHandler("setrole", setrole))
     bot_app.add_handler(CommandHandler("ban", ban))
@@ -648,6 +935,7 @@ async def main():
     logging.info(f"Вебхук: {webhook_url}")
 
     asyncio.create_task(check_reminders())
+    asyncio.create_task(cleanup_group_messages_job())
 
     app = web.Application()
     app.router.add_post('/webhook', handle_webhook)
