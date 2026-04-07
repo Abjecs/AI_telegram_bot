@@ -43,7 +43,7 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
-        # Таблица user_styles (с ролью и языком)
+        # Таблица user_styles
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_styles (
                 user_id BIGINT PRIMARY KEY,
@@ -66,7 +66,6 @@ async def init_db():
             END
             $$;
         ''')
-        # Таблица сообщений (личные)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -78,7 +77,6 @@ async def init_db():
                 timestamp TEXT
             )
         ''')
-        # Таблица напоминаний
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS reminders (
                 id SERIAL PRIMARY KEY,
@@ -88,7 +86,6 @@ async def init_db():
                 status TEXT DEFAULT 'active'
             )
         ''')
-        # Таблица кэша поиска
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS search_cache (
                 id SERIAL PRIMARY KEY,
@@ -99,7 +96,6 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         ''')
-        # Таблицы для групп
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS group_settings (
                 group_id BIGINT PRIMARY KEY,
@@ -138,7 +134,6 @@ async def init_db():
                 timestamp TIMESTAMP DEFAULT NOW()
             )
         ''')
-        # Новая таблица для облачного хранилища
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_files (
                 id SERIAL PRIMARY KEY,
@@ -163,7 +158,7 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-    logging.info("База данных инициализирована (включая user_files)")
+    logging.info("База данных инициализирована")
 
 # ==================== РОЛИ ====================
 async def get_user_role(user_id: int) -> str:
@@ -439,7 +434,7 @@ async def tgsearch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await tgsearch(query)
     await update.message.reply_text(result, parse_mode="Markdown", disable_web_page_preview=True)
 
-# ==================== ОБЛАЧНОЕ ХРАНИЛИЩЕ (С ДИАГНОСТИКОЙ) ====================
+# ==================== ОБЛАЧНОЕ ХРАНИЛИЩЕ ====================
 async def get_user_files(user_id: int):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, file_id, file_name, file_size, uploaded_at FROM user_files WHERE user_id = $1 ORDER BY uploaded_at DESC", user_id)
@@ -483,12 +478,9 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📤 Отправьте файл (документ, фото, видео) для загрузки в облако.")
 
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logging.info("=== handle_file_upload START ===")
     user_id = update.effective_user.id
     role = await get_user_role(user_id)
-    logging.info(f"User {user_id}, role {role}")
     if role == "banned":
-        logging.info("User banned, exit")
         return
     limits = {
         "test": {"max_size_mb": 10, "max_files": 5},
@@ -498,7 +490,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     }
     limit = limits.get(role, limits["test"])
     current_files = await get_user_file_count(user_id)
-    logging.info(f"Current files: {current_files}, limit: {limit}")
     if current_files >= limit["max_files"]:
         await update.message.reply_text(f"❌ Лимит файлов ({limit['max_files']}) исчерпан. Удалите ненужные через /delete.")
         return
@@ -507,7 +498,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     document = update.message.document
     photo = update.message.photo[-1] if update.message.photo else None
     video = update.message.video
-    logging.info(f"doc={document}, photo={photo}, video={video}")
     if document:
         file = document
         file_name = file.file_name or "file"
@@ -528,20 +518,16 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         file_id = file.file_id
     else:
         await update.message.reply_text("❌ Неподдерживаемый тип файла. Отправьте документ, фото или видео.")
-        logging.info("No file type detected")
         return
 
     size_mb = file_size / (1024 * 1024)
-    logging.info(f"File: {file_name}, size: {size_mb:.2f} MB")
     if size_mb > limit["max_size_mb"]:
         await update.message.reply_text(f"❌ Файл слишком большой ({size_mb:.1f} МБ). Максимум {limit['max_size_mb']} МБ для вашей роли.")
         return
 
     if not STORAGE_CHANNEL_ID:
         await update.message.reply_text("❌ Хранилище не настроено. Администратор уведомлен.")
-        logging.error("STORAGE_CHANNEL_ID is empty")
         return
-    logging.info(f"STORAGE_CHANNEL_ID = {STORAGE_CHANNEL_ID}")
 
     try:
         sent = await context.bot.copy_message(
@@ -549,7 +535,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
             from_chat_id=update.effective_chat.id,
             message_id=update.message.message_id
         )
-        logging.info(f"Message copied to channel, sent={sent}")
         if sent.document:
             new_file_id = sent.document.file_id
             new_file_name = sent.document.file_name or file_name
@@ -566,10 +551,8 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await save_file(user_id, new_file_id, new_file_name, file_size, mime_type)
         await update.message.reply_text(f"✅ Файл '{new_file_name}' загружен в облако. Используйте /files для просмотра.")
     except Exception as e:
-        logging.error(f"Ошибка при пересылке файла в канал: {e}", exc_info=True)
+        logging.error(f"Ошибка при пересылке файла в канал: {e}")
         await update.message.reply_text(f"❌ Ошибка при сохранении файла: {str(e)}")
-    finally:
-        logging.info("=== handle_file_upload END ===")
 
 async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -992,15 +975,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     username = update.effective_user.username or "NoUsername"
 
-    # Личные сообщения: сначала обрабатываем файлы
     if chat_type == "private":
-        logging.info(f"Private message from {user_id}, has_document={bool(update.message.document)}, has_photo={bool(update.message.photo)}, has_video={bool(update.message.video)}")
         if update.message.document or update.message.photo or update.message.video:
             await handle_file_upload(update, context)
             return
         if not user_message:
             return
-        # Обычный текст в личке
         style_key = await get_user_style(user_id)
         style_prompt = STYLES[style_key]["prompt"]
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -1020,7 +1000,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Ошибка при обращении к GigaChat. Попробуйте позже.")
         return
 
-    # Групповая логика
     if chat_type in ["group", "supergroup"]:
         group_id = update.effective_chat.id
         await save_group_message(group_id, user_id, username, user_message or "(медиа)")
