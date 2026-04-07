@@ -18,6 +18,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "default123")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 TGSTAT_TOKEN = os.getenv("TGSTAT_API_TOKEN", "")
+STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID")  # ID канала для хранения файлов
 PORT = int(os.environ.get("PORT", 8080))
 
 if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
@@ -42,7 +43,7 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
-        # Таблица user_styles
+        # Таблица user_styles (с ролью и языком)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_styles (
                 user_id BIGINT PRIMARY KEY,
@@ -137,6 +138,18 @@ async def init_db():
                 timestamp TIMESTAMP DEFAULT NOW()
             )
         ''')
+        # Новая таблица для облачного хранилища
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_files (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                file_id TEXT,
+                file_name TEXT,
+                file_size INT,
+                mime_type TEXT,
+                uploaded_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
         # Миграции для messages
         columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name='messages'")
         existing = [c['column_name'] for c in columns]
@@ -150,7 +163,7 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-    logging.info("База данных инициализирована")
+    logging.info("База данных инициализирована (включая user_files)")
 
 # ==================== РОЛИ ====================
 async def get_user_role(user_id: int) -> str:
@@ -426,6 +439,158 @@ async def tgsearch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await tgsearch(query)
     await update.message.reply_text(result, parse_mode="Markdown", disable_web_page_preview=True)
 
+# ==================== ОБЛАЧНОЕ ХРАНИЛИЩЕ ====================
+async def get_user_files(user_id: int):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT id, file_name, file_size, uploaded_at FROM user_files WHERE user_id = $1 ORDER BY uploaded_at DESC", user_id)
+        return rows
+
+async def get_file_by_id(file_id: int, user_id: int):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT file_id, file_name FROM user_files WHERE id = $1 AND user_id = $2", file_id, user_id)
+        return row
+
+async def save_file(user_id: int, file_id: str, file_name: str, file_size: int, mime_type: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO user_files (user_id, file_id, file_name, file_size, mime_type) VALUES ($1, $2, $3, $4, $5)",
+                           user_id, file_id, file_name, file_size, mime_type)
+
+async def delete_file_record(file_id: int, user_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM user_files WHERE id = $1 AND user_id = $2", file_id, user_id)
+
+async def get_user_file_count(user_id: int) -> int:
+    async with db_pool.acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM user_files WHERE user_id = $1", user_id)
+
+async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    role = await get_user_role(user_id)
+    # Проверка на бан
+    if role == "banned":
+        await update.message.reply_text("⛔ Вы заблокированы.")
+        return
+    # Проверка лимитов по ролям
+    limits = {
+        "test": {"max_size_mb": 10, "max_files": 5},
+        "standard": {"max_size_mb": 50, "max_files": 20},
+        "vip": {"max_size_mb": 100, "max_files": 100},
+        "admin": {"max_size_mb": 500, "max_files": 1000}
+    }
+    limit = limits.get(role, limits["test"])
+    current_files = await get_user_file_count(user_id)
+    if current_files >= limit["max_files"]:
+        await update.message.reply_text(f"❌ Вы достигли лимита файлов ({limit['max_files']}). Удалите ненужные через /delete.")
+        return
+    await update.message.reply_text("📤 Отправьте файл (документ, фото, видео) для загрузки в облако.")
+
+async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    role = await get_user_role(user_id)
+    if role == "banned":
+        return
+    limits = {
+        "test": {"max_size_mb": 10, "max_files": 5},
+        "standard": {"max_size_mb": 50, "max_files": 20},
+        "vip": {"max_size_mb": 100, "max_files": 100},
+        "admin": {"max_size_mb": 500, "max_files": 1000}
+    }
+    limit = limits.get(role, limits["test"])
+    current_files = await get_user_file_count(user_id)
+    if current_files >= limit["max_files"]:
+        await update.message.reply_text(f"❌ Лимит файлов ({limit['max_files']}) исчерпан. Удалите ненужные через /delete.")
+        return
+    # Определяем тип файла
+    document = update.message.document
+    photo = update.message.photo[-1] if update.message.photo else None
+    video = update.message.video
+    if document:
+        file = document
+        file_name = file.file_name or "file"
+        mime_type = file.mime_type or "application/octet-stream"
+        file_size = file.file_size
+        file_id = file.file_id
+    elif photo:
+        file = photo
+        file_name = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        mime_type = "image/jpeg"
+        file_size = file.file_size
+        file_id = file.file_id
+    elif video:
+        file = video
+        file_name = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        mime_type = "video/mp4"
+        file_size = file.file_size
+        file_id = file.file_id
+    else:
+        await update.message.reply_text("❌ Неподдерживаемый тип файла. Отправьте документ, фото или видео.")
+        return
+    # Проверка размера
+    size_mb = file_size / (1024 * 1024)
+    if size_mb > limit["max_size_mb"]:
+        await update.message.reply_text(f"❌ Файл слишком большой ({size_mb:.1f} МБ). Максимум {limit['max_size_mb']} МБ для вашей роли.")
+        return
+    # Пересылаем файл в канал
+    if not STORAGE_CHANNEL_ID:
+        await update.message.reply_text("❌ Хранилище не настроено. Администратор уведомлен.")
+        return
+    try:
+        sent = await context.bot.send_copy(chat_id=STORAGE_CHANNEL_ID, from_chat_id=update.effective_chat.id, message_id=update.message.message_id)
+        # Сохраняем информацию в БД
+        await save_file(user_id, sent.document.file_id if sent.document else (sent.photo[-1].file_id if sent.photo else sent.video.file_id), file_name, file_size, mime_type)
+        await update.message.reply_text(f"✅ Файл '{file_name}' загружен в облако. Используйте /files для просмотра.")
+    except Exception as e:
+        logging.error(f"Ошибка при пересылке файла в канал: {e}")
+        await update.message.reply_text("❌ Ошибка при сохранении файла.")
+
+async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    files = await get_user_files(user_id)
+    if not files:
+        await update.message.reply_text("У вас нет загруженных файлов. Используйте /upload для загрузки.")
+        return
+    text = "📁 Ваши файлы:\n"
+    for f in files:
+        size_mb = f["file_size"] / (1024 * 1024)
+        text += f"ID {f['id']}: {f['file_name']} ({size_mb:.1f} МБ) – {f['uploaded_at'].strftime('%Y-%m-%d %H:%M')}\n"
+    await update.message.reply_text(text)
+
+async def get_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /get <id>")
+        return
+    try:
+        file_id = int(context.args[0])
+        user_id = update.effective_user.id
+        file_info = await get_file_by_id(file_id, user_id)
+        if not file_info:
+            await update.message.reply_text("❌ Файл не найден или у вас нет доступа.")
+            return
+        # Отправляем файл из канала (нужно получить file_id из канала, но у нас он уже сохранён)
+        await update.message.reply_document(document=file_info["file_id"], filename=file_info["file_name"])
+    except Exception as e:
+        logging.error(f"Ошибка при скачивании файла: {e}")
+        await update.message.reply_text("❌ Ошибка при получении файла.")
+
+async def delete_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /delete <id>")
+        return
+    try:
+        file_id = int(context.args[0])
+        user_id = update.effective_user.id
+        # Получаем file_id из канала перед удалением (чтобы удалить из канала)
+        file_info = await get_file_by_id(file_id, user_id)
+        if not file_info:
+            await update.message.reply_text("❌ Файл не найден или у вас нет доступа.")
+            return
+        # Удаляем запись из БД (файл из канала не удаляем – канал служит архивом, но можно и удалить, если нужно)
+        await delete_file_record(file_id, user_id)
+        await update.message.reply_text(f"✅ Файл {file_info['file_name']} удалён из вашего облака.")
+    except Exception as e:
+        logging.error(f"Ошибка при удалении файла: {e}")
+        await update.message.reply_text("❌ Ошибка при удалении файла.")
+
 # ==================== ГРУППОВЫЕ ФУНКЦИИ ====================
 async def get_group_settings(group_id: int):
     async with db_pool.acquire() as conn:
@@ -468,7 +633,7 @@ async def save_group_message(group_id: int, user_id: int, username: str, message
 async def get_group_history(group_id: int, limit: int = 10):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id, username, message, timestamp FROM group_messages WHERE group_id = $1 ORDER BY timestamp DESC LIMIT $2", group_id, limit)
-        return rows[::-1]  # в хронологическом порядке
+        return rows[::-1]
 
 async def cleanup_old_group_messages(group_id: int, days: int):
     async with db_pool.acquire() as conn:
@@ -478,7 +643,6 @@ async def is_group_admin(update: Update, user_id: int) -> bool:
     chat_member = await update.effective_chat.get_member(user_id)
     return chat_member.status in ["administrator", "creator"]
 
-# Команды для настройки группы
 async def set_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type not in ["group", "supergroup"]:
         await update.message.reply_text("Эта команда работает только в группах.")
@@ -613,7 +777,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/lang <ru|en|de|...> — язык перевода по умолчанию\n"
         "/explain <слово> — объяснить слово/фразу\n"
         "/news <запрос> — новости\n"
-        "/tgsearch <запрос> — поиск в Telegram\n\n"
+        "/tgsearch <запрос> — поиск в Telegram\n"
+        "/upload — загрузить файл в облако\n"
+        "/files — список ваших файлов\n"
+        "/get <id> — скачать файл\n"
+        "/delete <id> — удалить файл\n\n"
         "Групповые команды (для админов групп):\n"
         "/setwelcome <текст> — приветствие\n"
         "/set_cleanup <дни> — автоочистка истории сообщений\n"
@@ -799,42 +967,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     username = update.effective_user.username or "NoUsername"
 
+    # Если это ответ на команду /upload – обрабатываем файл
+    if update.message.document or update.message.photo or update.message.video:
+        # Проверяем, есть ли ожидание загрузки (можно без флага, просто обрабатываем всегда, если файл)
+        # Но чтобы не конфликтовать с другими сообщениями, добавим простую проверку: если пользователь отправил файл в личку, то считаем что это загрузка
+        if chat_type == "private":
+            await handle_file_upload(update, context)
+            return
+
     # Групповая логика
     if chat_type in ["group", "supergroup"]:
         group_id = update.effective_chat.id
-        # Сохраняем сообщение в историю группы
-        await save_group_message(group_id, user_id, username, user_message)
+        await save_group_message(group_id, user_id, username, user_message or "(медиа)")
 
-        # Статистика сообщений (если включена)
         settings = await get_group_settings(group_id)
         if settings["count_messages"]:
             await increment_message_count(group_id, user_id)
 
-        # Проверка триггеров (сначала статические, если есть)
+        # Триггеры
         triggers = await get_triggers(group_id)
         for t in triggers:
-            if t["keyword"] in user_message.lower():
-                # Статический ответ
+            if user_message and t["keyword"] in user_message.lower():
                 await update.message.reply_text(t["response"])
                 return
 
-        # НОВАЯ ЛОГИКА: если в сообщении есть слово "кай" (в любом месте, независимо от регистра)
-        if "кай" in user_message.lower():
-            # Получаем последние 10 сообщений группы для контекста
+        # Реакция на слово "кай"
+        if user_message and "кай" in user_message.lower():
             history = await get_group_history(group_id, limit=10)
-            if history:
-                context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history])
-            else:
-                context_text = "История пуста."
-            prompt = (
-                f"Ты – помощник в Telegram-группе. Вот последние сообщения (для контекста):\n{context_text}\n\n"
-                f"Теперь ответь на сообщение пользователя {username}: {user_message}\n"
-                f"Отвечай кратко, дружелюбно, по делу. Учитывай историю чата."
-            )
+            context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history]) if history else "История пуста."
+            prompt = f"Ты – помощник в Telegram-группе. Вот последние сообщения (для контекста):\n{context_text}\n\nОтветь на сообщение пользователя {username}: {user_message}"
             try:
                 async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
                     messages = [
-                        {"role": "system", "content": "Ты – полезный бот. Отвечай на сообщения, в которых упоминается слово 'Кай'."},
+                        {"role": "system", "content": "Ты – полезный бот. Отвечай на сообщения, содержащие слово 'Кай'."},
                         {"role": "user", "content": prompt}
                     ]
                     payload = {"messages": messages}
@@ -843,17 +1008,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(ai_reply)
             except Exception as e:
                 logging.error(f"Ошибка GigaChat при ответе на 'Кай': {e}")
-                await update.message.reply_text("❌ Ошибка при генерации ответа.")
             return
 
-        # Проверка упоминания бота (если бота упомянули или ответили на его сообщение)
+        # Упоминания и ответы
         bot_username = (await context.bot.get_me()).username
         mention = f"@{bot_username}"
         reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-        if mention in user_message or reply_to_bot:
+        if user_message and (mention in user_message or reply_to_bot):
             history = await get_group_history(group_id, limit=10)
             context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history]) if history else "История пуста."
-            prompt = f"Ты – помощник в Telegram-группе. Вот последние сообщения (для контекста):\n{context_text}\n\nОтветь на сообщение пользователя {username}: {user_message}"
+            prompt = f"Ты – помощник в Telegram-группе. Вот последние сообщения:\n{context_text}\n\nОтветь на сообщение пользователя {username}: {user_message}"
             try:
                 async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
                     messages = [
@@ -866,13 +1030,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(ai_reply)
             except Exception as e:
                 logging.error(f"Ошибка GigaChat при упоминании: {e}")
-                await update.message.reply_text("❌ Ошибка при генерации ответа.")
             return
-
-        # На остальные сообщения в группе не отвечаем
         return
 
     # Личные сообщения
+    if not user_message:
+        # Если не текст, но файл – обработаем в другом месте (уже выше для private)
+        return
     style_key = await get_user_style(user_id)
     style_prompt = STYLES[style_key]["prompt"]
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -894,7 +1058,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== АВТООЧИСТКА ГРУППОВОЙ ИСТОРИИ ====================
 async def cleanup_group_messages_job():
     while True:
-        await asyncio.sleep(3600)  # раз в час
+        await asyncio.sleep(3600)
         try:
             async with db_pool.acquire() as conn:
                 groups = await conn.fetch("SELECT group_id, cleanup_days FROM group_settings WHERE cleanup_days IS NOT NULL")
@@ -936,6 +1100,10 @@ async def main():
     bot_app.add_handler(CommandHandler("explain", explain_command))
     bot_app.add_handler(CommandHandler("news", news_command))
     bot_app.add_handler(CommandHandler("tgsearch", tgsearch_command))
+    bot_app.add_handler(CommandHandler("upload", upload_command))
+    bot_app.add_handler(CommandHandler("files", files_command))
+    bot_app.add_handler(CommandHandler("get", get_command))
+    bot_app.add_handler(CommandHandler("delete", delete_file_command))
     bot_app.add_handler(CommandHandler("style", style_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     bot_app.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
