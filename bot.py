@@ -442,7 +442,7 @@ async def tgsearch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==================== ОБЛАЧНОЕ ХРАНИЛИЩЕ ====================
 async def get_user_files(user_id: int):
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT id, file_name, file_size, uploaded_at FROM user_files WHERE user_id = $1 ORDER BY uploaded_at DESC", user_id)
+        rows = await conn.fetch("SELECT id, file_id, file_name, file_size, uploaded_at FROM user_files WHERE user_id = $1 ORDER BY uploaded_at DESC", user_id)
         return rows
 
 async def get_file_by_id(file_id: int, user_id: int):
@@ -466,11 +466,9 @@ async def get_user_file_count(user_id: int) -> int:
 async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     role = await get_user_role(user_id)
-    # Проверка на бан
     if role == "banned":
         await update.message.reply_text("⛔ Вы заблокированы.")
         return
-    # Проверка лимитов по ролям
     limits = {
         "test": {"max_size_mb": 10, "max_files": 5},
         "standard": {"max_size_mb": 50, "max_files": 20},
@@ -500,6 +498,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if current_files >= limit["max_files"]:
         await update.message.reply_text(f"❌ Лимит файлов ({limit['max_files']}) исчерпан. Удалите ненужные через /delete.")
         return
+
     # Определяем тип файла
     document = update.message.document
     photo = update.message.photo[-1] if update.message.photo else None
@@ -525,23 +524,39 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         await update.message.reply_text("❌ Неподдерживаемый тип файла. Отправьте документ, фото или видео.")
         return
+
     # Проверка размера
     size_mb = file_size / (1024 * 1024)
     if size_mb > limit["max_size_mb"]:
         await update.message.reply_text(f"❌ Файл слишком большой ({size_mb:.1f} МБ). Максимум {limit['max_size_mb']} МБ для вашей роли.")
         return
-    # Пересылаем файл в канал
+
     if not STORAGE_CHANNEL_ID:
         await update.message.reply_text("❌ Хранилище не настроено. Администратор уведомлен.")
         return
+
     try:
-        sent = await context.bot.send_copy(chat_id=STORAGE_CHANNEL_ID, from_chat_id=update.effective_chat.id, message_id=update.message.message_id)
-        # Сохраняем информацию в БД
-        await save_file(user_id, sent.document.file_id if sent.document else (sent.photo[-1].file_id if sent.photo else sent.video.file_id), file_name, file_size, mime_type)
-        await update.message.reply_text(f"✅ Файл '{file_name}' загружен в облако. Используйте /files для просмотра.")
+        # Пересылаем файл в канал (используем copy_message, он работает с каналами)
+        sent = await update.message.copy(chat_id=STORAGE_CHANNEL_ID)
+        # Получаем file_id из пересланного сообщения
+        if sent.document:
+            new_file_id = sent.document.file_id
+            new_file_name = sent.document.file_name or file_name
+        elif sent.photo:
+            new_file_id = sent.photo[-1].file_id
+            new_file_name = file_name
+        elif sent.video:
+            new_file_id = sent.video.file_id
+            new_file_name = file_name
+        else:
+            await update.message.reply_text("❌ Не удалось определить тип файла после пересылки.")
+            return
+
+        await save_file(user_id, new_file_id, new_file_name, file_size, mime_type)
+        await update.message.reply_text(f"✅ Файл '{new_file_name}' загружен в облако. Используйте /files для просмотра.")
     except Exception as e:
         logging.error(f"Ошибка при пересылке файла в канал: {e}")
-        await update.message.reply_text("❌ Ошибка при сохранении файла.")
+        await update.message.reply_text(f"❌ Ошибка при сохранении файла: {str(e)}")
 
 async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -566,7 +581,6 @@ async def get_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not file_info:
             await update.message.reply_text("❌ Файл не найден или у вас нет доступа.")
             return
-        # Отправляем файл из канала (нужно получить file_id из канала, но у нас он уже сохранён)
         await update.message.reply_document(document=file_info["file_id"], filename=file_info["file_name"])
     except Exception as e:
         logging.error(f"Ошибка при скачивании файла: {e}")
@@ -579,12 +593,10 @@ async def delete_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         file_id = int(context.args[0])
         user_id = update.effective_user.id
-        # Получаем file_id из канала перед удалением (чтобы удалить из канала)
         file_info = await get_file_by_id(file_id, user_id)
         if not file_info:
             await update.message.reply_text("❌ Файл не найден или у вас нет доступа.")
             return
-        # Удаляем запись из БД (файл из канала не удаляем – канал служит архивом, но можно и удалить, если нужно)
         await delete_file_record(file_id, user_id)
         await update.message.reply_text(f"✅ Файл {file_info['file_name']} удалён из вашего облака.")
     except Exception as e:
@@ -967,93 +979,94 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     username = update.effective_user.username or "NoUsername"
 
-    # Если это ответ на команду /upload – обрабатываем файл
-    if update.message.document or update.message.photo or update.message.video:
-        # Проверяем, есть ли ожидание загрузки (можно без флага, просто обрабатываем всегда, если файл)
-        # Но чтобы не конфликтовать с другими сообщениями, добавим простую проверку: если пользователь отправил файл в личку, то считаем что это загрузка
-        if chat_type == "private":
+    # Если это файл в личной переписке – обрабатываем загрузку (даже если нет текста)
+    if chat_type == "private":
+        if update.message.document or update.message.photo or update.message.video:
             await handle_file_upload(update, context)
             return
+        # Если нет текста и не файл – игнорируем
+        if not user_message:
+            return
+        # Личные текстовые сообщения – обычный ответ
+        style_key = await get_user_style(user_id)
+        style_prompt = STYLES[style_key]["prompt"]
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        try:
+            async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+                messages = [
+                    {"role": "system", "content": style_prompt},
+                    {"role": "user", "content": user_message}
+                ]
+                payload = {"messages": messages}
+                response = await giga.achat(payload)
+                ai_reply = response.choices[0].message.content
+            await save_message(user_id, username, user_message, ai_reply, style_key)
+            await update.message.reply_text(ai_reply)
+        except Exception as e:
+            logging.error(f"Ошибка GigaChat: {e}")
+            await update.message.reply_text("❌ Ошибка при обращении к GigaChat. Попробуйте позже.")
+        return
 
     # Групповая логика
     if chat_type in ["group", "supergroup"]:
         group_id = update.effective_chat.id
+        # Сохраняем сообщение (даже если без текста – сохраняем пометку)
         await save_group_message(group_id, user_id, username, user_message or "(медиа)")
 
         settings = await get_group_settings(group_id)
         if settings["count_messages"]:
             await increment_message_count(group_id, user_id)
 
-        # Триггеры
-        triggers = await get_triggers(group_id)
-        for t in triggers:
-            if user_message and t["keyword"] in user_message.lower():
-                await update.message.reply_text(t["response"])
+        # Триггеры (только если есть текст)
+        if user_message:
+            triggers = await get_triggers(group_id)
+            for t in triggers:
+                if t["keyword"] in user_message.lower():
+                    await update.message.reply_text(t["response"])
+                    return
+
+            # Реакция на слово "кай"
+            if "кай" in user_message.lower():
+                history = await get_group_history(group_id, limit=10)
+                context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history]) if history else "История пуста."
+                prompt = f"Ты – помощник в Telegram-группе. Вот последние сообщения (для контекста):\n{context_text}\n\nОтветь на сообщение пользователя {username}: {user_message}"
+                try:
+                    async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+                        messages = [
+                            {"role": "system", "content": "Ты – полезный бот. Отвечай на сообщения, содержащие слово 'Кай'."},
+                            {"role": "user", "content": prompt}
+                        ]
+                        payload = {"messages": messages}
+                        response = await giga.achat(payload)
+                        ai_reply = response.choices[0].message.content
+                        await update.message.reply_text(ai_reply)
+                except Exception as e:
+                    logging.error(f"Ошибка GigaChat при ответе на 'Кай': {e}")
                 return
 
-        # Реакция на слово "кай"
-        if user_message and "кай" in user_message.lower():
-            history = await get_group_history(group_id, limit=10)
-            context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history]) if history else "История пуста."
-            prompt = f"Ты – помощник в Telegram-группе. Вот последние сообщения (для контекста):\n{context_text}\n\nОтветь на сообщение пользователя {username}: {user_message}"
-            try:
-                async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
-                    messages = [
-                        {"role": "system", "content": "Ты – полезный бот. Отвечай на сообщения, содержащие слово 'Кай'."},
-                        {"role": "user", "content": prompt}
-                    ]
-                    payload = {"messages": messages}
-                    response = await giga.achat(payload)
-                    ai_reply = response.choices[0].message.content
-                    await update.message.reply_text(ai_reply)
-            except Exception as e:
-                logging.error(f"Ошибка GigaChat при ответе на 'Кай': {e}")
-            return
-
-        # Упоминания и ответы
-        bot_username = (await context.bot.get_me()).username
-        mention = f"@{bot_username}"
-        reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-        if user_message and (mention in user_message or reply_to_bot):
-            history = await get_group_history(group_id, limit=10)
-            context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history]) if history else "История пуста."
-            prompt = f"Ты – помощник в Telegram-группе. Вот последние сообщения:\n{context_text}\n\nОтветь на сообщение пользователя {username}: {user_message}"
-            try:
-                async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
-                    messages = [
-                        {"role": "system", "content": "Ты – полезный бот. Отвечай кратко, дружелюбно."},
-                        {"role": "user", "content": prompt}
-                    ]
-                    payload = {"messages": messages}
-                    response = await giga.achat(payload)
-                    ai_reply = response.choices[0].message.content
-                    await update.message.reply_text(ai_reply)
-            except Exception as e:
-                logging.error(f"Ошибка GigaChat при упоминании: {e}")
-            return
+            # Упоминания и ответы
+            bot_username = (await context.bot.get_me()).username
+            mention = f"@{bot_username}"
+            reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
+            if mention in user_message or reply_to_bot:
+                history = await get_group_history(group_id, limit=10)
+                context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history]) if history else "История пуста."
+                prompt = f"Ты – помощник в Telegram-группе. Вот последние сообщения:\n{context_text}\n\nОтветь на сообщение пользователя {username}: {user_message}"
+                try:
+                    async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+                        messages = [
+                            {"role": "system", "content": "Ты – полезный бот. Отвечай кратко, дружелюбно."},
+                            {"role": "user", "content": prompt}
+                        ]
+                        payload = {"messages": messages}
+                        response = await giga.achat(payload)
+                        ai_reply = response.choices[0].message.content
+                        await update.message.reply_text(ai_reply)
+                except Exception as e:
+                    logging.error(f"Ошибка GigaChat при упоминании: {e}")
+                return
+        # Если сообщение без текста (например, стикер, гифка) – не отвечаем
         return
-
-    # Личные сообщения
-    if not user_message:
-        # Если не текст, но файл – обработаем в другом месте (уже выше для private)
-        return
-    style_key = await get_user_style(user_id)
-    style_prompt = STYLES[style_key]["prompt"]
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    try:
-        async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
-            messages = [
-                {"role": "system", "content": style_prompt},
-                {"role": "user", "content": user_message}
-            ]
-            payload = {"messages": messages}
-            response = await giga.achat(payload)
-            ai_reply = response.choices[0].message.content
-        await save_message(user_id, username, user_message, ai_reply, style_key)
-        await update.message.reply_text(ai_reply)
-    except Exception as e:
-        logging.error(f"Ошибка GigaChat: {e}")
-        await update.message.reply_text("❌ Ошибка при обращении к GigaChat. Попробуйте позже.")
 
 # ==================== АВТООЧИСТКА ГРУППОВОЙ ИСТОРИИ ====================
 async def cleanup_group_messages_job():
