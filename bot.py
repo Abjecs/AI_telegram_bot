@@ -439,7 +439,7 @@ async def tgsearch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await tgsearch(query)
     await update.message.reply_text(result, parse_mode="Markdown", disable_web_page_preview=True)
 
-# ==================== ОБЛАЧНОЕ ХРАНИЛИЩЕ ====================
+# ==================== ОБЛАЧНОЕ ХРАНИЛИЩЕ (С ДИАГНОСТИКОЙ) ====================
 async def get_user_files(user_id: int):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, file_id, file_name, file_size, uploaded_at FROM user_files WHERE user_id = $1 ORDER BY uploaded_at DESC", user_id)
@@ -483,9 +483,12 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📤 Отправьте файл (документ, фото, видео) для загрузки в облако.")
 
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info("=== handle_file_upload START ===")
     user_id = update.effective_user.id
     role = await get_user_role(user_id)
+    logging.info(f"User {user_id}, role {role}")
     if role == "banned":
+        logging.info("User banned, exit")
         return
     limits = {
         "test": {"max_size_mb": 10, "max_files": 5},
@@ -495,6 +498,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     }
     limit = limits.get(role, limits["test"])
     current_files = await get_user_file_count(user_id)
+    logging.info(f"Current files: {current_files}, limit: {limit}")
     if current_files >= limit["max_files"]:
         await update.message.reply_text(f"❌ Лимит файлов ({limit['max_files']}) исчерпан. Удалите ненужные через /delete.")
         return
@@ -503,6 +507,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     document = update.message.document
     photo = update.message.photo[-1] if update.message.photo else None
     video = update.message.video
+    logging.info(f"doc={document}, photo={photo}, video={video}")
     if document:
         file = document
         file_name = file.file_name or "file"
@@ -523,26 +528,28 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         file_id = file.file_id
     else:
         await update.message.reply_text("❌ Неподдерживаемый тип файла. Отправьте документ, фото или видео.")
+        logging.info("No file type detected")
         return
 
-    # Проверка размера
     size_mb = file_size / (1024 * 1024)
+    logging.info(f"File: {file_name}, size: {size_mb:.2f} MB")
     if size_mb > limit["max_size_mb"]:
         await update.message.reply_text(f"❌ Файл слишком большой ({size_mb:.1f} МБ). Максимум {limit['max_size_mb']} МБ для вашей роли.")
         return
 
     if not STORAGE_CHANNEL_ID:
         await update.message.reply_text("❌ Хранилище не настроено. Администратор уведомлен.")
+        logging.error("STORAGE_CHANNEL_ID is empty")
         return
+    logging.info(f"STORAGE_CHANNEL_ID = {STORAGE_CHANNEL_ID}")
 
     try:
-        # Пересылаем файл в канал
         sent = await context.bot.copy_message(
-            chat_id=STORAGE_CHANNEL_ID,
+            chat_id=int(STORAGE_CHANNEL_ID),
             from_chat_id=update.effective_chat.id,
             message_id=update.message.message_id
         )
-        # Получаем file_id из пересланного сообщения
+        logging.info(f"Message copied to channel, sent={sent}")
         if sent.document:
             new_file_id = sent.document.file_id
             new_file_name = sent.document.file_name or file_name
@@ -559,8 +566,10 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await save_file(user_id, new_file_id, new_file_name, file_size, mime_type)
         await update.message.reply_text(f"✅ Файл '{new_file_name}' загружен в облако. Используйте /files для просмотра.")
     except Exception as e:
-        logging.error(f"Ошибка при пересылке файла в канал: {e}")
+        logging.error(f"Ошибка при пересылке файла в канал: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Ошибка при сохранении файла: {str(e)}")
+    finally:
+        logging.info("=== handle_file_upload END ===")
 
 async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -985,6 +994,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Личные сообщения: сначала обрабатываем файлы
     if chat_type == "private":
+        logging.info(f"Private message from {user_id}, has_document={bool(update.message.document)}, has_photo={bool(update.message.photo)}, has_video={bool(update.message.video)}")
         if update.message.document or update.message.photo or update.message.video:
             await handle_file_upload(update, context)
             return
@@ -1013,14 +1023,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Групповая логика
     if chat_type in ["group", "supergroup"]:
         group_id = update.effective_chat.id
-        # Сохраняем сообщение
         await save_group_message(group_id, user_id, username, user_message or "(медиа)")
 
         settings = await get_group_settings(group_id)
         if settings["count_messages"]:
             await increment_message_count(group_id, user_id)
 
-        # Триггеры
         if user_message:
             triggers = await get_triggers(group_id)
             for t in triggers:
@@ -1028,7 +1036,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(t["response"])
                     return
 
-            # Реакция на слово "кай"
             if "кай" in user_message.lower():
                 history = await get_group_history(group_id, limit=10)
                 context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history]) if history else "История пуста."
@@ -1047,7 +1054,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logging.error(f"Ошибка GigaChat при ответе на 'Кай': {e}")
                 return
 
-            # Упоминания и ответы
             bot_username = (await context.bot.get_me()).username
             mention = f"@{bot_username}"
             reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
