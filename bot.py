@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler, CallbackQueryHandler
@@ -38,6 +38,7 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
+        # Таблица user_styles (с ролью)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_styles (
                 user_id BIGINT PRIMARY KEY,
@@ -55,6 +56,7 @@ async def init_db():
             END
             $$;
         ''')
+        # Таблица messages
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -66,18 +68,17 @@ async def init_db():
                 timestamp TEXT
             )
         ''')
+        # Таблица reminders (напоминания)
         await conn.execute('''
-            CREATE TABLE IF NOT EXISTS blocked_users (
-                user_id BIGINT PRIMARY KEY,
-                blocked_at TEXT
+            CREATE TABLE IF NOT EXISTS reminders (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                remind_at TIMESTAMP,
+                text TEXT,
+                status TEXT DEFAULT 'active'
             )
         ''')
-        await conn.execute('''
-            UPDATE user_styles
-            SET role = 'banned'
-            WHERE user_id IN (SELECT user_id FROM blocked_users)
-              AND role != 'admin'
-        ''')
+        # Остальные миграции
         columns = await conn.fetch("SELECT column_name FROM information_schema.columns WHERE table_name='messages'")
         existing = [c['column_name'] for c in columns]
         if 'username' not in existing:
@@ -90,8 +91,9 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-    logging.info("База данных инициализирована")
+    logging.info("База данных инициализирована (включая таблицу reminders)")
 
+# ==================== РОЛИ ====================
 async def get_user_role(user_id: int) -> str:
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT role FROM user_styles WHERE user_id = $1", user_id)
@@ -109,6 +111,7 @@ async def set_user_role(user_id: int, role: str):
         await conn.execute("INSERT INTO user_styles (user_id, style, role) VALUES ($1, 'standart', $2) ON CONFLICT (user_id) DO UPDATE SET role = $2", 
                            user_id, role)
 
+# ==================== СТИЛИ ====================
 async def get_user_style(user_id):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT style FROM user_styles WHERE user_id = $1", user_id)
@@ -132,18 +135,60 @@ async def save_message(user_id, username, user_message, bot_reply, style_used):
             VALUES ($1, $2, $3, $4, $5, $6)
         ''', user_id, username, user_message, bot_reply, style_used, datetime.now().isoformat())
 
-# ==================== ПРОВЕРКА РОЛИ ====================
-def require_role(allowed_roles: list):
-    def decorator(func):
-        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-            user_id = update.effective_user.id
-            role = await get_user_role(user_id)
-            if role not in allowed_roles:
-                await update.message.reply_text("⛔ У вас недостаточно прав для этой команды.")
-                return
-            return await func(update, context, *args, **kwargs)
-        return wrapper
-    return decorator
+# ==================== НАПОМИНАНИЯ ====================
+def parse_remind_time(time_str: str) -> datetime:
+    """Парсит время: '2025-12-31 23:59' или '+1h', '+30m', '+2d'."""
+    now = datetime.now()
+    if time_str.startswith('+'):
+        # относительное время: +1h, +30m, +2d
+        num = int(time_str[1:-1])
+        unit = time_str[-1]
+        if unit == 'h':
+            return now + timedelta(hours=num)
+        elif unit == 'm':
+            return now + timedelta(minutes=num)
+        elif unit == 'd':
+            return now + timedelta(days=num)
+        else:
+            raise ValueError("Формат: +<число>h/m/d")
+    else:
+        # абсолютное время: YYYY-MM-DD HH:MM
+        try:
+            return datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+        except:
+            raise ValueError("Неверный формат. Используйте 'YYYY-MM-DD HH:MM' или '+1h'")
+
+async def add_reminder(user_id: int, remind_at: datetime, text: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO reminders (user_id, remind_at, text) VALUES ($1, $2, $3)", 
+                           user_id, remind_at, text)
+
+async def get_active_reminders(user_id: int):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT id, remind_at, text FROM reminders WHERE user_id = $1 AND status = 'active' ORDER BY remind_at", user_id)
+        return rows
+
+async def delete_reminder(reminder_id: int, user_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE reminders SET status = 'deleted' WHERE id = $1 AND user_id = $2", reminder_id, user_id)
+
+async def check_reminders():
+    """Фоновая задача: каждую минуту проверяет и отправляет напоминания."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            async with db_pool.acquire() as conn:
+                rows = await conn.fetch("SELECT id, user_id, text FROM reminders WHERE status = 'active' AND remind_at <= NOW()")
+                for row in rows:
+                    # Отправляем сообщение пользователю
+                    try:
+                        await bot_app.bot.send_message(chat_id=row["user_id"], text=f"🔔 Напоминание: {row['text']}")
+                    except Exception as e:
+                        logging.error(f"Не удалось отправить напоминание {row['id']}: {e}")
+                    # Помечаем как отправленное
+                    await conn.execute("UPDATE reminders SET status = 'sent' WHERE id = $1", row["id"])
+        except Exception as e:
+            logging.error(f"Ошибка в check_reminders: {e}")
 
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,14 +197,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"Привет! Твой стиль: {STYLES[style]['name']}. Роль: {role}.\n"
         f"Используй /style для смены стиля, /help для справки.\n"
-        f"Если ты новый пользователь, введи пароль командой /auth <пароль>."
+        f"Новые команды: /remind, /myreminds, /delremind"
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = await get_user_role(update.effective_user.id)
-    text = "/start — приветствие\n/help — справка\n/style — выбрать стиль\n/auth — авторизация\n\nДоступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
+    text = (
+        "/start — приветствие\n"
+        "/help — справка\n"
+        "/style — выбрать стиль\n"
+        "/auth — авторизация\n"
+        "/remind <время> <текст> — создать напоминание\n"
+        "/myreminds — список напоминаний\n"
+        "/delremind <id> — удалить напоминание\n\n"
+        "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
+    )
     if role == "admin":
-        text += "\n\nАдмин-команды:\n/setrole <user_id> <role> — изменить роль\n/ban <user_id> — заблокировать\n/unban <user_id> — разблокировать\n/users — список пользователей\n/stats — статистика\n/history — последние 10 диалогов"
+        text += "\n\nАдмин-команды:\n/setrole <user_id> <role>\n/ban <user_id>\n/unban <user_id>\n/users\n/stats\n/history"
     await update.message.reply_text(text)
 
 async def auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -173,6 +227,57 @@ async def auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Авторизация успешна! Вам присвоена роль standard.")
     else:
         await update.message.reply_text("❌ Неверный пароль.")
+
+async def remind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /remind <время> <текст>\nПример: /remind +1h Позвонить маме\nИли: /remind 2025-12-31 23:59 Новый год")
+        return
+    time_str = context.args[0]
+    text = " ".join(context.args[1:])
+    try:
+        remind_at = parse_remind_time(time_str)
+        if remind_at < datetime.now():
+            await update.message.reply_text("❌ Нельзя установить напоминание в прошлом.")
+            return
+        await add_reminder(update.effective_user.id, remind_at, text)
+        await update.message.reply_text(f"✅ Напоминание установлено на {remind_at.strftime('%Y-%m-%d %H:%M')}\nТекст: {text}")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+async def myreminds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    rows = await get_active_reminders(update.effective_user.id)
+    if not rows:
+        await update.message.reply_text("У вас нет активных напоминаний.")
+        return
+    text = "📋 Ваши напоминания:\n"
+    for row in rows:
+        remind_at = row["remind_at"].strftime("%Y-%m-%d %H:%M")
+        text += f"ID {row['id']}: {remind_at} – {row['text']}\n"
+    await update.message.reply_text(text)
+
+async def delremind_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /delremind <id>")
+        return
+    try:
+        rid = int(context.args[0])
+        await delete_reminder(rid, update.effective_user.id)
+        await update.message.reply_text(f"✅ Напоминание {rid} удалено.")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+# ==================== АДМИН-КОМАНДЫ ====================
+def require_role(allowed_roles: list):
+    def decorator(func):
+        async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+            user_id = update.effective_user.id
+            role = await get_user_role(user_id)
+            if role not in allowed_roles:
+                await update.message.reply_text("⛔ У вас недостаточно прав для этой команды.")
+                return
+            return await func(update, context, *args, **kwargs)
+        return wrapper
+    return decorator
 
 @require_role(["admin"])
 async def setrole(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -254,6 +359,7 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"🕒 {row['timestamp']}\n\n"
     await update.message.reply_text(text[:4000])
 
+# ==================== СТИЛИ (кнопки) ====================
 async def style_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(v["name"], callback_data=f"style_{k}")] for k, v in STYLES.items()]
     await update.message.reply_text("Выберите стиль общения:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -313,12 +419,17 @@ async def main():
     global bot_app
     await init_db()
     bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Основные команды
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("help", help_command))
     bot_app.add_handler(CommandHandler("auth", auth_command))
+    bot_app.add_handler(CommandHandler("remind", remind_command))
+    bot_app.add_handler(CommandHandler("myreminds", myreminds_command))
+    bot_app.add_handler(CommandHandler("delremind", delremind_command))
     bot_app.add_handler(CommandHandler("style", style_command))
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     bot_app.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
+    # Админ-команды
     bot_app.add_handler(CommandHandler("setrole", setrole))
     bot_app.add_handler(CommandHandler("ban", ban))
     bot_app.add_handler(CommandHandler("unban", unban))
@@ -332,6 +443,10 @@ async def main():
     webhook_url = f"https://{external_host}/webhook"
     await bot_app.bot.set_webhook(webhook_url)
     logging.info(f"Вебхук: {webhook_url}")
+
+    # Запускаем фоновую задачу для напоминаний
+    asyncio.create_task(check_reminders())
+
     app = web.Application()
     app.router.add_post('/webhook', handle_webhook)
     app.router.add_get('/health', health)
