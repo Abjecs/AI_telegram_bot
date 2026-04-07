@@ -105,7 +105,7 @@ async def init_db():
                 welcome_message TEXT,
                 farewell_message TEXT,
                 count_messages BOOLEAN DEFAULT TRUE,
-                cleanup_days INT DEFAULT 30   -- автоочистка сообщений группы через N дней
+                cleanup_days INT DEFAULT 30
             )
         ''')
         await conn.execute('''
@@ -127,7 +127,6 @@ async def init_db():
                 PRIMARY KEY (group_id, user_id)
             )
         ''')
-        # Новая таблица для хранения истории сообщений группы
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS group_messages (
                 id SERIAL PRIMARY KEY,
@@ -151,7 +150,7 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-    logging.info("База данных инициализирована (включая групповую историю и автоочистку)")
+    logging.info("База данных инициализирована")
 
 # ==================== РОЛИ ====================
 async def get_user_role(user_id: int) -> str:
@@ -427,7 +426,7 @@ async def tgsearch_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await tgsearch(query)
     await update.message.reply_text(result, parse_mode="Markdown", disable_web_page_preview=True)
 
-# ==================== ГРУППОВЫЕ ФУНКЦИИ (расширенные) ====================
+# ==================== ГРУППОВЫЕ ФУНКЦИИ ====================
 async def get_group_settings(group_id: int):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT welcome_message, farewell_message, count_messages, cleanup_days FROM group_settings WHERE group_id = $1", group_id)
@@ -466,7 +465,7 @@ async def save_group_message(group_id: int, user_id: int, username: str, message
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO group_messages (group_id, user_id, username, message) VALUES ($1, $2, $3, $4)", group_id, user_id, username, message)
 
-async def get_group_history(group_id: int, limit: int = 20):
+async def get_group_history(group_id: int, limit: int = 10):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id, username, message, timestamp FROM group_messages WHERE group_id = $1 ORDER BY timestamp DESC LIMIT $2", group_id, limit)
         return rows[::-1]  # в хронологическом порядке
@@ -623,6 +622,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/deltrigger <id> — удалить триггер\n"
         "/groupstats — статистика активности\n"
         "/group_history — последние 20 сообщений группы\n\n"
+        "В группе бот отвечает на сообщения, содержащие слово 'Кай' (в любом месте текста), анализируя контекст последних сообщений.\n\n"
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
     if role == "admin":
@@ -810,27 +810,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if settings["count_messages"]:
             await increment_message_count(group_id, user_id)
 
-        # Проверка триггеров
+        # Проверка триггеров (сначала статические, если есть)
         triggers = await get_triggers(group_id)
         for t in triggers:
             if t["keyword"] in user_message.lower():
+                # Статический ответ
                 await update.message.reply_text(t["response"])
                 return
 
-        # Проверка упоминания бота
-        bot_username = (await context.bot.get_me()).username
-        mention = f"@{bot_username}"
-        reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
-        if mention in user_message or reply_to_bot:
+        # НОВАЯ ЛОГИКА: если в сообщении есть слово "кай" (в любом месте, независимо от регистра)
+        if "кай" in user_message.lower():
             # Получаем последние 10 сообщений группы для контекста
             history = await get_group_history(group_id, limit=10)
-            context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history])
-            # Формируем запрос к GigaChat с учётом контекста
-            prompt = f"Ты — помощник в Telegram-группе. Вот история последних сообщений (для контекста):\n{context_text}\n\nТеперь ответь на сообщение пользователя {username}: {user_message}"
+            if history:
+                context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history])
+            else:
+                context_text = "История пуста."
+            prompt = (
+                f"Ты – помощник в Telegram-группе. Вот последние сообщения (для контекста):\n{context_text}\n\n"
+                f"Теперь ответь на сообщение пользователя {username}: {user_message}\n"
+                f"Отвечай кратко, дружелюбно, по делу. Учитывай историю чата."
+            )
             try:
                 async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
                     messages = [
-                        {"role": "system", "content": "Ты — полезный бот. Отвечай кратко, дружелюбно, с учётом истории чата."},
+                        {"role": "system", "content": "Ты – полезный бот. Отвечай на сообщения, в которых упоминается слово 'Кай'."},
                         {"role": "user", "content": prompt}
                     ]
                     payload = {"messages": messages}
@@ -838,9 +842,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ai_reply = response.choices[0].message.content
                     await update.message.reply_text(ai_reply)
             except Exception as e:
-                logging.error(f"Ошибка GigaChat в группе: {e}")
+                logging.error(f"Ошибка GigaChat при ответе на 'Кай': {e}")
                 await update.message.reply_text("❌ Ошибка при генерации ответа.")
             return
+
+        # Проверка упоминания бота (если бота упомянули или ответили на его сообщение)
+        bot_username = (await context.bot.get_me()).username
+        mention = f"@{bot_username}"
+        reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
+        if mention in user_message or reply_to_bot:
+            history = await get_group_history(group_id, limit=10)
+            context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history]) if history else "История пуста."
+            prompt = f"Ты – помощник в Telegram-группе. Вот последние сообщения (для контекста):\n{context_text}\n\nОтветь на сообщение пользователя {username}: {user_message}"
+            try:
+                async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+                    messages = [
+                        {"role": "system", "content": "Ты – полезный бот. Отвечай кратко, дружелюбно."},
+                        {"role": "user", "content": prompt}
+                    ]
+                    payload = {"messages": messages}
+                    response = await giga.achat(payload)
+                    ai_reply = response.choices[0].message.content
+                    await update.message.reply_text(ai_reply)
+            except Exception as e:
+                logging.error(f"Ошибка GigaChat при упоминании: {e}")
+                await update.message.reply_text("❌ Ошибка при генерации ответа.")
+            return
+
         # На остальные сообщения в группе не отвечаем
         return
 
@@ -863,7 +891,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Ошибка GigaChat: {e}")
         await update.message.reply_text("❌ Ошибка при обращении к GigaChat. Попробуйте позже.")
 
-# ==================== АВТООЧИСТКА ГРУППОВОЙ ИСТОРИИ (фоновая задача) ====================
+# ==================== АВТООЧИСТКА ГРУППОВОЙ ИСТОРИИ ====================
 async def cleanup_group_messages_job():
     while True:
         await asyncio.sleep(3600)  # раз в час
