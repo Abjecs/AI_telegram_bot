@@ -18,7 +18,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "default123")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 TGSTAT_TOKEN = os.getenv("TGSTAT_API_TOKEN", "")
-STORAGE_CHANNEL_ID = os.getenv("-1003868789392")
+STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID")
 PORT = int(os.environ.get("PORT", 8080))
 
 if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
@@ -483,9 +483,11 @@ async def upload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📤 Отправьте файл (документ, фото, видео) для загрузки в облако.")
 
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info("=== handle_file_upload CALLED ===")
     user_id = update.effective_user.id
     role = await get_user_role(user_id)
     if role == "banned":
+        logging.info("User banned, exit")
         return
     limits = {
         "test": {"max_size_mb": 10, "max_files": 5},
@@ -495,6 +497,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     }
     limit = limits.get(role, limits["test"])
     current_files = await get_user_file_count(user_id)
+    logging.info(f"Current files: {current_files}, limit: {limit}")
     if current_files >= limit["max_files"]:
         await update.message.reply_text(f"❌ Лимит файлов ({limit['max_files']}) исчерпан. Удалите ненужные через /delete.")
         return
@@ -503,6 +506,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     document = update.message.document
     photo = update.message.photo[-1] if update.message.photo else None
     video = update.message.video
+    logging.info(f"File detected: doc={bool(document)}, photo={bool(photo)}, video={bool(video)}")
     if document:
         file_name = document.file_name or "file"
         file_size = document.file_size
@@ -517,25 +521,28 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         file_id = video.file_id
     else:
         await update.message.reply_text("❌ Неподдерживаемый тип файла. Отправьте документ, фото или видео.")
+        logging.info("No file type detected")
         return
 
     size_mb = file_size / (1024 * 1024)
+    logging.info(f"File: {file_name}, size: {size_mb:.2f} MB")
     if size_mb > limit["max_size_mb"]:
         await update.message.reply_text(f"❌ Файл слишком большой ({size_mb:.1f} МБ). Максимум {limit['max_size_mb']} МБ для вашей роли.")
         return
 
     if not STORAGE_CHANNEL_ID:
         await update.message.reply_text("❌ Хранилище не настроено. Администратор уведомлен.")
+        logging.error("STORAGE_CHANNEL_ID is empty")
         return
+    logging.info(f"STORAGE_CHANNEL_ID = {STORAGE_CHANNEL_ID}")
 
     try:
-        # Копируем сообщение с файлом в канал
         sent = await context.bot.copy_message(
             chat_id=int(STORAGE_CHANNEL_ID),
             from_chat_id=update.effective_chat.id,
             message_id=update.message.message_id
         )
-        # Получаем file_id из пересланного сообщения
+        logging.info("Message copied to channel")
         if sent.document:
             new_file_id = sent.document.file_id
             new_file_name = sent.document.file_name or file_name
@@ -551,7 +558,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         await save_file(user_id, new_file_id, new_file_name, file_size, "application/octet-stream")
         await update.message.reply_text(f"✅ Файл '{new_file_name}' загружен в облако. Используйте /files для просмотра.")
-        logging.info(f"Файл {new_file_name} сохранён для пользователя {user_id}")
+        logging.info(f"File {new_file_name} saved for user {user_id}")
     except Exception as e:
         logging.error(f"Ошибка при пересылке файла в канал: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Ошибка при сохранении файла: {str(e)}")
@@ -979,6 +986,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ЛИЧНАЯ ПЕРЕПИСКА
     if chat_type == "private":
+        logging.info(f"PRIVATE: user={user_id}, text='{user_message}', doc={bool(update.message.document)}, photo={bool(update.message.photo)}, video={bool(update.message.video)}")
         # Если есть файл (документ, фото, видео) – обрабатываем загрузку
         if update.message.document or update.message.photo or update.message.video:
             await handle_file_upload(update, context)
