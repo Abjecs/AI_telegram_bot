@@ -935,8 +935,8 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = "https://api.imgflip.com/caption_image"
     params = {
         "template_id": template_id,
-        "username": "IMGFLIP_USERNAME",
-        "password": "IMGFLIP_PASSWORD",
+        "username": IMGFLIP_USERNAME,
+        "password": IMGFLIP_PASSWORD,
         "text0": top_text,
         "text1": bottom_text,
         "font": "impact"
