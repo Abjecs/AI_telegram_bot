@@ -987,6 +987,46 @@ async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     encoded_prompt = urllib.parse.quote(prompt)
     image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
     await update.message.reply_photo(photo=image_url, caption=f"🎨 Генерация по запросу: {prompt}")
+
+# ==================== GIF (GIPHY API) ====================
+GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "")
+if not GIPHY_API_KEY:
+    logging.warning("GIPHY_API_KEY not set, /gif command will not work")
+
+async def giphy_search(query: str, limit: int = 20):
+    if not GIPHY_API_KEY:
+        return None
+    url = "https://api.giphy.com/v1/gifs/search"
+    params = {
+        "api_key": GIPHY_API_KEY,
+        "q": query,
+        "limit": limit,
+        "rating": "g",
+        "lang": "ru"
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params) as resp:
+                data = await resp.json()
+                if data.get("data"):
+                    import random
+                    gif = random.choice(data["data"])
+                    return gif["images"]["fixed_height"]["url"]
+        except Exception as e:
+            logging.error(f"GIPHY error: {e}")
+            return None
+
+async def gif_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /gif <запрос>\nПример: /gif кот")
+        return
+    query = " ".join(context.args)
+    await update.message.reply_text("🔍 Ищу GIF...")
+    url = await giphy_search(query)
+    if url:
+        await update.message.reply_animation(animation=url, caption=f"🎬 GIF по запросу: {query}")
+    else:
+        await update.message.reply_text("❌ GIF не найден. Попробуйте другой запрос.")
     
 # ==================== ГРУППОВЫЕ ФУНКЦИИ ====================
 async def get_group_settings(group_id: int):
@@ -1194,6 +1234,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/meme <шаблон> | <верх> | <низ> — создать мем\n"
         "/gpt <запрос> — генерация текста (стихи, шутки)\n"
         "/imagine <описание> — генерация картинки (экспериментально)\n"
+        "/gif <запрос> — поиск GIF\n"
         "В группе бот отвечает на сообщения, содержащие слово 'Кай' (в любом месте текста), анализируя контекст последних сообщений.\n\n"
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
@@ -1519,6 +1560,7 @@ async def main():
     bot_app.add_handler(CommandHandler("meme", meme_command))
     bot_app.add_handler(CommandHandler("gpt", gpt_command))
     bot_app.add_handler(CommandHandler("imagine", imagine_command))  # опционально
+    bot_app.add_handler(CommandHandler("gif", gif_command))
     # Групповые команды
     bot_app.add_handler(CommandHandler("setwelcome", set_welcome))
     bot_app.add_handler(CommandHandler("set_cleanup", set_cleanup))
