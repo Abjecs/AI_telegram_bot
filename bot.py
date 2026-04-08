@@ -537,30 +537,40 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     logging.info(f"STORAGE_CHANNEL_ID = {STORAGE_CHANNEL_ID}")
 
     try:
-        sent = await context.bot.copy_message(
-            chat_id=int(STORAGE_CHANNEL_ID),
-            from_chat_id=update.effective_chat.id,
-            message_id=update.message.message_id
-        )
-        logging.info("Message copied to channel")
-        if sent.document:
+        # Отправляем файл в канал напрямую, используя оригинальный file_id
+        if document:
+            sent = await context.bot.send_document(
+                chat_id=int(STORAGE_CHANNEL_ID),
+                document=file_id,
+                caption=file_name
+            )
             new_file_id = sent.document.file_id
             new_file_name = sent.document.file_name or file_name
-        elif sent.photo:
+        elif photo:
+            sent = await context.bot.send_photo(
+                chat_id=int(STORAGE_CHANNEL_ID),
+                photo=file_id,
+                caption=file_name
+            )
             new_file_id = sent.photo[-1].file_id
             new_file_name = file_name
-        elif sent.video:
+        elif video:
+            sent = await context.bot.send_video(
+                chat_id=int(STORAGE_CHANNEL_ID),
+                video=file_id,
+                caption=file_name
+            )
             new_file_id = sent.video.file_id
             new_file_name = file_name
         else:
-            await update.message.reply_text("❌ Не удалось определить тип файла после пересылки.")
+            await update.message.reply_text("❌ Не удалось отправить файл в канал.")
             return
 
         await save_file(user_id, new_file_id, new_file_name, file_size, "application/octet-stream")
         await update.message.reply_text(f"✅ Файл '{new_file_name}' загружен в облако. Используйте /files для просмотра.")
         logging.info(f"File {new_file_name} saved for user {user_id}")
     except Exception as e:
-        logging.error(f"Ошибка при пересылке файла в канал: {e}", exc_info=True)
+        logging.error(f"Ошибка при отправке файла в канал: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Ошибка при сохранении файла: {str(e)}")
 
 async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
