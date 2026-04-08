@@ -1088,6 +1088,7 @@ async def cleanup_group_messages_job():
 async def handle_webhook(request):
     try:
         data = await request.json()
+        logging.info(f"Webhook data: {data}")  # <--- ДОБАВЛЕНО
         update = Update.de_json(data, bot_app.bot)
         await bot_app.process_update(update)
         return web.Response(status=200)
