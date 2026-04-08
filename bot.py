@@ -20,6 +20,8 @@ AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "default123")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 TGSTAT_TOKEN = os.getenv("TGSTAT_API_TOKEN", "")
 STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID")
+IMGFLIP_USERNAME = os.getenv("IMGFLIP_USERNAME", "")
+IMGFLIP_PASSWORD = os.getenv("IMGFLIP_PASSWORD", "")
 PORT = int(os.environ.get("PORT", 8080))
 
 if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
@@ -933,8 +935,8 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = "https://api.imgflip.com/caption_image"
     params = {
         "template_id": template_id,
-        "username": "AbjecsI",
-        "password": "13579lehagfs67",
+        "username": "IMGFLIP_USERNAME",
+        "password": "IMGFLIP_PASSWORD",
         "text0": top_text,
         "text1": bottom_text,
         "font": "impact"
