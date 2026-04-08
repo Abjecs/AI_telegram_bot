@@ -1102,7 +1102,7 @@ async def health(request):
 async def main():
     global bot_app
     await init_db()
-    bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
+    bot_app = Application.builder().token(TELEGRAM_TOKEN).build() 
     # Основные команды
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("help", help_command))
@@ -1121,7 +1121,8 @@ async def main():
     bot_app.add_handler(CommandHandler("get", get_command))
     bot_app.add_handler(CommandHandler("delete", delete_file_command))
     bot_app.add_handler(CommandHandler("style", style_command))
-    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Изменённый обработчик сообщений (теперь ALL)
+    bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     bot_app.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
     # Групповые команды
     bot_app.add_handler(CommandHandler("setwelcome", set_welcome))
