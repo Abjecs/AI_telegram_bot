@@ -4,6 +4,7 @@ import os
 import traceback
 import hashlib
 import aiohttp
+import random
 from datetime import datetime, timedelta
 from aiohttp import web
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -43,7 +44,7 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     async with db_pool.acquire() as conn:
-        # Таблица user_styles
+        # Таблица user_styles (с ролью и языком)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_styles (
                 user_id BIGINT PRIMARY KEY,
@@ -138,7 +139,7 @@ async def init_db():
                 timestamp TIMESTAMP DEFAULT NOW()
             )
         ''')
-        # Новая таблица для облачного хранилища
+        # Таблица для облачного хранилища
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_files (
                 id SERIAL PRIMARY KEY,
@@ -148,6 +149,40 @@ async def init_db():
                 file_size INT,
                 mime_type TEXT,
                 uploaded_at TIMESTAMP DEFAULT NOW()
+            )
+        ''')
+        # НОВЫЕ ТАБЛИЦЫ ДЛЯ ИГР
+        # Викторины: вопросы и статистика
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS quiz_questions (
+                id SERIAL PRIMARY KEY,
+                question TEXT,
+                options TEXT[],
+                correct_index INT,
+                category TEXT
+            )
+        ''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS quiz_scores (
+                user_id BIGINT PRIMARY KEY,
+                score INT DEFAULT 0
+            )
+        ''')
+        # Казино: внутренняя валюта (монеты)
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS casino_coins (
+                user_id BIGINT PRIMARY KEY,
+                coins INT DEFAULT 100
+            )
+        ''')
+        # Крестики-нолики: игровые сессии
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS tic_tac_toe (
+                chat_id BIGINT,
+                user_id BIGINT,
+                board TEXT,
+                turn TEXT, -- 'X' or 'O'
+                PRIMARY KEY (chat_id, user_id)
             )
         ''')
         # Миграции для messages
@@ -163,7 +198,7 @@ async def init_db():
             await conn.execute('ALTER TABLE messages ADD COLUMN style_used TEXT')
         if 'timestamp' not in existing:
             await conn.execute('ALTER TABLE messages ADD COLUMN timestamp TEXT')
-    logging.info("База данных инициализирована")
+    logging.info("База данных инициализирована (включая игровые таблицы)")
 
 # ==================== РОЛИ ====================
 async def get_user_role(user_id: int) -> str:
@@ -502,7 +537,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"❌ Лимит файлов ({limit['max_files']}) исчерпан. Удалите ненужные через /delete.")
         return
 
-    # Определяем тип файла
     document = update.message.document
     photo = update.message.photo[-1] if update.message.photo else None
     video = update.message.video
@@ -537,7 +571,6 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     logging.info(f"STORAGE_CHANNEL_ID = {STORAGE_CHANNEL_ID}")
 
     try:
-        # Отправляем файл в канал напрямую, используя оригинальный file_id
         if document:
             sent = await context.bot.send_document(
                 chat_id=int(STORAGE_CHANNEL_ID),
@@ -617,6 +650,263 @@ async def delete_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logging.error(f"Ошибка при удалении файла: {e}")
         await update.message.reply_text("❌ Ошибка при удалении файла.")
+
+# ==================== ИГРЫ ====================
+# 1. ВИКТОРИНА (Quiz)
+async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    role = await get_user_role(user_id)
+    if role == "banned":
+        await update.message.reply_text("⛔ Вы заблокированы.")
+        return
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT id, question, options, correct_index FROM quiz_questions ORDER BY RANDOM() LIMIT 1")
+        if not row:
+            await conn.execute("INSERT INTO quiz_questions (question, options, correct_index) VALUES ($1, $2, $3)", 
+                               "Столица Франции?", ["Лондон", "Берлин", "Париж", "Мадрид"], 2)
+            await conn.execute("INSERT INTO quiz_questions (question, options, correct_index) VALUES ($1, $2, $3)", 
+                               "Сколько планет в Солнечной системе?", ["7", "8", "9", "10"], 1)
+            await conn.execute("INSERT INTO quiz_questions (question, options, correct_index) VALUES ($1, $2, $3)", 
+                               "Кто написал 'Войну и мир'?", ["Толстой", "Достоевский", "Пушкин", "Чехов"], 0)
+            row = await conn.fetchrow("SELECT id, question, options, correct_index FROM quiz_questions ORDER BY RANDOM() LIMIT 1")
+    if not row:
+        await update.message.reply_text("❌ Нет вопросов в базе. Добавьте их через админку.")
+        return
+    qid = row["id"]
+    question = row["question"]
+    options = row["options"]
+    correct = row["correct_index"]
+    context.user_data["quiz"] = {"qid": qid, "correct": correct}
+    keyboard = [[InlineKeyboardButton(opt, callback_data=f"quiz_{qid}_{i}")] for i, opt in enumerate(options)]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(f"❓ Викторина:\n{question}", reply_markup=reply_markup)
+
+async def quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data.split("_")
+    if len(data) != 3:
+        return
+    qid = int(data[1])
+    chosen = int(data[2])
+    user_id = update.effective_user.id
+    if "quiz" not in context.user_data or context.user_data["quiz"]["qid"] != qid:
+        await query.edit_message_text("❓ Вопрос устарел. Начните новую викторину /quiz")
+        return
+    correct = context.user_data["quiz"]["correct"]
+    if chosen == correct:
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO quiz_scores (user_id, score) VALUES ($1, 1) ON CONFLICT (user_id) DO UPDATE SET score = quiz_scores.score + 1", user_id)
+        await query.edit_message_text("✅ Правильно! Ваш счёт увеличен.")
+    else:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT options FROM quiz_questions WHERE id = $1", qid)
+            correct_answer = row["options"][correct] if row else "неизвестно"
+        await query.edit_message_text(f"❌ Неправильно. Правильный ответ: {correct_answer}")
+    del context.user_data["quiz"]
+
+async def quiz_score_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    async with db_pool.acquire() as conn:
+        score = await conn.fetchval("SELECT score FROM quiz_scores WHERE user_id = $1", user_id)
+        if score is None:
+            score = 0
+    await update.message.reply_text(f"🏆 Ваш счёт в викторине: {score} очков.")
+
+# 2. КАЗИНО (кости / рулетка) – внутренняя валюта
+async def get_coins(user_id: int) -> int:
+    async with db_pool.acquire() as conn:
+        val = await conn.fetchval("SELECT coins FROM casino_coins WHERE user_id = $1", user_id)
+        if val is None:
+            await conn.execute("INSERT INTO casino_coins (user_id, coins) VALUES ($1, 100)", user_id)
+            return 100
+        return val
+
+async def add_coins(user_id: int, amount: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE casino_coins SET coins = coins + $1 WHERE user_id = $2", amount, user_id)
+
+async def casino_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    coins = await get_coins(update.effective_user.id)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎲 Кости (1-6)", callback_data="casino_dice")],
+        [InlineKeyboardButton("🎰 Рулетка (чёт/нечет)", callback_data="casino_roulette")],
+        [InlineKeyboardButton("💰 Баланс", callback_data="casino_balance")]
+    ])
+    await update.message.reply_text(f"🎰 Казино. Ваш баланс: {coins} монет.\nВыберите игру:", reply_markup=keyboard)
+
+async def casino_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    user_id = update.effective_user.id
+    coins = await get_coins(user_id)
+    if data == "casino_balance":
+        await query.edit_message_text(f"💰 Ваш баланс: {coins} монет.")
+        return
+    if data == "casino_dice":
+        if coins < 10:
+            await query.edit_message_text("❌ Недостаточно монет (нужно 10).")
+            return
+        result = random.randint(1, 6)
+        win = result >= 4
+        if win:
+            await add_coins(user_id, 10)
+            await query.edit_message_text(f"🎲 Выпало {result}. Вы выиграли 20 монет! Новый баланс: {coins + 10}")
+        else:
+            await add_coins(user_id, -10)
+            await query.edit_message_text(f"🎲 Выпало {result}. Вы проиграли 10 монет. Баланс: {coins - 10}")
+    elif data == "casino_roulette":
+        if coins < 10:
+            await query.edit_message_text("❌ Недостаточно монет (нужно 10).")
+            return
+        result = random.randint(0, 36)
+        context.user_data["roulette_result"] = result
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("Чётное", callback_data="roulette_even")],
+            [InlineKeyboardButton("Нечётное", callback_data="roulette_odd")]
+        ])
+        await query.edit_message_text(f"🎡 Число {result} уже выпало. Угадайте чёт или нечет? (ставка 10 монет)", reply_markup=keyboard)
+    elif data.startswith("roulette_"):
+        result = context.user_data.pop("roulette_result", None)
+        if result is None:
+            await query.edit_message_text("❌ Ошибка, начните игру заново.")
+            return
+        user_choice = data.split("_")[1]  # "even" or "odd"
+        actual_parity = "even" if result % 2 == 0 else "odd"
+        if user_choice == actual_parity:
+            await add_coins(user_id, 10)
+            await query.edit_message_text(f"✅ Вы угадали! Число {result} ({actual_parity}). Вы выиграли 20 монет. Новый баланс: {coins + 10}")
+        else:
+            await add_coins(user_id, -10)
+            await query.edit_message_text(f"❌ Не угадали. Число {result} ({actual_parity}). Вы проиграли 10 монет. Баланс: {coins - 10}")
+
+# 3. КРЕСТИКИ-НОЛИКИ (головоломка)
+async def ttt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    board = [" "]*9
+    await save_ttt_state(chat_id, user_id, board, "X")
+    await send_ttt_board(update, context, chat_id, user_id, board, "X")
+
+async def save_ttt_state(chat_id, user_id, board, turn):
+    board_str = "".join(board)
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO tic_tac_toe (chat_id, user_id, board, turn) VALUES ($1, $2, $3, $4) ON CONFLICT (chat_id, user_id) DO UPDATE SET board = $3, turn = $4",
+                           chat_id, user_id, board_str, turn)
+
+async def load_ttt_state(chat_id, user_id):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT board, turn FROM tic_tac_toe WHERE chat_id = $1 AND user_id = $2", chat_id, user_id)
+        if row:
+            return list(row["board"]), row["turn"]
+        return None, None
+
+async def send_ttt_board(update, context, chat_id, user_id, board, turn):
+    text = "🎮 Крестики-нолики (ваш ход)\n"
+    for i in range(0, 9, 3):
+        text += f"{board[i] or ' '}|{board[i+1] or ' '}|{board[i+2] or ' '}\n"
+        if i < 6:
+            text += "-+-+-\n"
+    keyboard = []
+    row_buttons = []
+    for idx, val in enumerate(board):
+        if val == " ":
+            row_buttons.append(InlineKeyboardButton(str(idx+1), callback_data=f"ttt_{idx}"))
+        else:
+            row_buttons.append(InlineKeyboardButton(val, callback_data="ttt_no"))
+        if (idx+1) % 3 == 0:
+            keyboard.append(row_buttons)
+            row_buttons = []
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(text, reply_markup=reply_markup)
+
+async def ttt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    if not data.startswith("ttt_"):
+        return
+    idx_str = data.split("_")[1]
+    if idx_str == "no":
+        await query.edit_message_text("Это поле уже занято.")
+        return
+    idx = int(idx_str)
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    board, turn = await load_ttt_state(chat_id, user_id)
+    if board is None:
+        await query.edit_message_text("Игра не найдена. Начните новую /ttt")
+        return
+    if turn != "X":
+        await query.edit_message_text("Сейчас не ваш ход.")
+        return
+    if board[idx] != " ":
+        await query.edit_message_text("Клетка занята!")
+        return
+    board[idx] = "X"
+    winner = check_winner(board)
+    if winner or " " not in board:
+        await finish_ttt(update, query, chat_id, user_id, board, winner)
+        return
+    bot_move = find_best_move(board)
+    if bot_move is not None:
+        board[bot_move] = "O"
+    winner = check_winner(board)
+    if winner or " " not in board:
+        await finish_ttt(update, query, chat_id, user_id, board, winner)
+        return
+    await save_ttt_state(chat_id, user_id, board, "X")
+    await send_ttt_board(update, context, chat_id, user_id, board, "X")
+    await query.message.delete()
+
+def check_winner(board):
+    lines = [(0,1,2), (3,4,5), (6,7,8), (0,3,6), (1,4,7), (2,5,8), (0,4,8), (2,4,6)]
+    for a,b,c in lines:
+        if board[a] == board[b] == board[c] and board[a] != " ":
+            return board[a]
+    return None
+
+def find_best_move(board):
+    for i in range(9):
+        if board[i] == " ":
+            board[i] = "O"
+            if check_winner(board) == "O":
+                board[i] = " "
+                return i
+            board[i] = " "
+    for i in range(9):
+        if board[i] == " ":
+            board[i] = "X"
+            if check_winner(board) == "X":
+                board[i] = " "
+                return i
+            board[i] = " "
+    if board[4] == " ":
+        return 4
+    for i in [0,2,6,8]:
+        if board[i] == " ":
+            return i
+    for i in range(9):
+        if board[i] == " ":
+            return i
+    return None
+
+async def finish_ttt(update, query, chat_id, user_id, board, winner):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM tic_tac_toe WHERE chat_id = $1 AND user_id = $2", chat_id, user_id)
+    if winner == "X":
+        result_text = "🎉 Вы выиграли!"
+    elif winner == "O":
+        result_text = "🤖 Бот выиграл."
+    else:
+        result_text = "🤝 Ничья."
+    display = ""
+    for i in range(0,9,3):
+        display += f"{board[i] or ' '}|{board[i+1] or ' '}|{board[i+2] or ' '}\n"
+        if i < 6:
+            display += "-+-+-\n"
+    await query.edit_message_text(f"{display}\n{result_text}")
 
 # ==================== ГРУППОВЫЕ ФУНКЦИИ ====================
 async def get_group_settings(group_id: int):
@@ -808,7 +1098,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/upload — загрузить файл в облако\n"
         "/files — список ваших файлов\n"
         "/get <id> — скачать файл\n"
-        "/delete <id> — удалить файл\n\n"
+        "/delete <id> — удалить файл\n"
+        "/quiz — случайный вопрос викторины\n"
+        "/score — ваш счёт в викторине\n"
+        "/casino — игры в казино (кости, рулетка)\n"
+        "/ttt — крестики-нолики с ботом\n\n"
         "Групповые команды (для админов групп):\n"
         "/setwelcome <текст> — приветствие\n"
         "/set_cleanup <дни> — автоочистка истории сообщений\n"
@@ -997,11 +1291,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ЛИЧНАЯ ПЕРЕПИСКА
     if chat_type == "private":
         logging.info(f"PRIVATE: user={user_id}, text='{user_message}', doc={bool(update.message.document)}, photo={bool(update.message.photo)}, video={bool(update.message.video)}")
-        # Если есть файл (документ, фото, видео) – обрабатываем загрузку
+        # Если есть файл – обрабатываем загрузку
         if update.message.document or update.message.photo or update.message.video:
             await handle_file_upload(update, context)
             return
-        # Если нет текста и нет файла – игнорируем
         if not user_message:
             return
         # Обычный текст – отвечаем через GigaChat
@@ -1098,7 +1391,7 @@ async def cleanup_group_messages_job():
 async def handle_webhook(request):
     try:
         data = await request.json()
-        logging.info(f"Webhook data: {data}")  # <--- ДОБАВЛЕНО
+        logging.info(f"Webhook data: {data}")
         update = Update.de_json(data, bot_app.bot)
         await bot_app.process_update(update)
         return web.Response(status=200)
@@ -1112,7 +1405,7 @@ async def health(request):
 async def main():
     global bot_app
     await init_db()
-    bot_app = Application.builder().token(TELEGRAM_TOKEN).build() 
+    bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
     # Основные команды
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("help", help_command))
@@ -1130,10 +1423,16 @@ async def main():
     bot_app.add_handler(CommandHandler("files", files_command))
     bot_app.add_handler(CommandHandler("get", get_command))
     bot_app.add_handler(CommandHandler("delete", delete_file_command))
+    bot_app.add_handler(CommandHandler("quiz", quiz_command))
+    bot_app.add_handler(CommandHandler("score", quiz_score_command))
+    bot_app.add_handler(CommandHandler("casino", casino_command))
+    bot_app.add_handler(CommandHandler("ttt", ttt_command))
     bot_app.add_handler(CommandHandler("style", style_command))
-    # Изменённый обработчик сообщений (теперь ALL)
     bot_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     bot_app.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
+    bot_app.add_handler(CallbackQueryHandler(quiz_callback, pattern="^quiz_"))
+    bot_app.add_handler(CallbackQueryHandler(casino_callback, pattern="^(casino_|roulette_)"))
+    bot_app.add_handler(CallbackQueryHandler(ttt_callback, pattern="^ttt_"))
     # Групповые команды
     bot_app.add_handler(CommandHandler("setwelcome", set_welcome))
     bot_app.add_handler(CommandHandler("set_cleanup", set_cleanup))
