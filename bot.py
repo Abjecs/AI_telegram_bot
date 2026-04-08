@@ -18,7 +18,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "default123")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 TGSTAT_TOKEN = os.getenv("TGSTAT_API_TOKEN", "")
-STORAGE_CHANNEL_ID = os.getenv("-1003868789392")
+STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID")
 PORT = int(os.environ.get("PORT", 8080))
 
 if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
@@ -506,12 +506,15 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if document:
         file_name = document.file_name or "file"
         file_size = document.file_size
+        file_id = document.file_id
     elif photo:
         file_name = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
         file_size = photo.file_size
+        file_id = photo.file_id
     elif video:
         file_name = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
         file_size = video.file_size
+        file_id = video.file_id
     else:
         await update.message.reply_text("❌ Неподдерживаемый тип файла. Отправьте документ, фото или видео.")
         return
@@ -548,8 +551,9 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         await save_file(user_id, new_file_id, new_file_name, file_size, "application/octet-stream")
         await update.message.reply_text(f"✅ Файл '{new_file_name}' загружен в облако. Используйте /files для просмотра.")
+        logging.info(f"Файл {new_file_name} сохранён для пользователя {user_id}")
     except Exception as e:
-        logging.error(f"Ошибка при пересылке файла в канал: {e}")
+        logging.error(f"Ошибка при пересылке файла в канал: {e}", exc_info=True)
         await update.message.reply_text(f"❌ Ошибка при сохранении файла: {str(e)}")
 
 async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -643,7 +647,6 @@ async def get_group_history(group_id: int, limit: int = 10):
 
 async def cleanup_old_group_messages(group_id: int, days: int):
     async with db_pool.acquire() as conn:
-        # Исправлено: вместо интервала с подстановкой используем конкатенацию или параметр
         await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - ($2 || ' days')::INTERVAL", group_id, days)
 
 async def is_group_admin(update: Update, user_id: int) -> bool:
