@@ -908,6 +908,84 @@ async def finish_ttt(update, query, chat_id, user_id, board, winner):
             display += "-+-+-\n"
     await query.edit_message_text(f"{display}\n{result_text}")
 
+# ==================== ГЕНЕРАЦИЯ МЕМОВ (IMGFLIP) ====================
+import aiohttp
+import urllib.parse
+
+async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Генерация мема по шаблону."""
+    if not context.args:
+        await update.message.reply_text(
+            "Использование: /meme <шаблон> | <верхний текст> | <нижний текст>\n"
+            "Пример: /meme 101440 | When you see the code | It works!\n"
+            "Популярные шаблоны: 101440 (Distracted Boyfriend), 61579 (One Does Not Simply), 5496396 (Drake Hotline Bling)"
+        )
+        return
+    # Парсим аргументы: разделитель "|"
+    args = " ".join(context.args).split("|")
+    if len(args) < 2:
+        await update.message.reply_text("Недостаточно аргументов. Используйте разделитель |")
+        return
+    template_id = args[0].strip()
+    top_text = args[1].strip() if len(args) > 1 else ""
+    bottom_text = args[2].strip() if len(args) > 2 else ""
+    
+    url = "https://api.imgflip.com/caption_image"
+    params = {
+        "template_id": template_id,
+        "username": "telegram_bot",
+        "password": "dummy",
+        "text0": top_text,
+        "text1": bottom_text,
+        "font": "impact"
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, data=params) as resp:
+                data = await resp.json()
+                if data.get("success"):
+                    meme_url = data["data"]["url"]
+                    await update.message.reply_photo(photo=meme_url, caption=f"🖼 Мем по шаблону {template_id}")
+                else:
+                    await update.message.reply_text(f"❌ Ошибка: {data.get('error_message', 'Неизвестная ошибка')}")
+        except Exception as e:
+            logging.error(f"Meme error: {e}")
+            await update.message.reply_text("❌ Не удалось создать мем.")
+
+# ==================== ГЕНЕРАЦИЯ ТЕКСТА ЧЕРЕЗ GIGACHAT ====================
+async def gpt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Генерация текста (стихи, шутки, идеи)."""
+    if not context.args:
+        await update.message.reply_text("Использование: /gpt <запрос>\nПример: /gpt Напиши стих про кота")
+        return
+    query = " ".join(context.args)
+    await update.message.reply_text("🤖 Генерирую...")
+    try:
+        async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+            messages = [
+                {"role": "system", "content": "Ты — креативный помощник. Генерируй тексты (стихи, шутки, идеи) по запросу. Отвечай кратко, но содержательно."},
+                {"role": "user", "content": query}
+            ]
+            payload = {"messages": messages}
+            response = await giga.achat(payload)
+            answer = response.choices[0].message.content
+            await update.message.reply_text(answer)
+    except Exception as e:
+        logging.error(f"GPT error: {e}")
+        await update.message.reply_text("❌ Ошибка генерации текста.")
+
+# ==================== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (POLLINATIONS AI) – ОПЦИОНАЛЬНО ====================
+async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Генерация изображения через Pollinations AI (бесплатно)."""
+    if not context.args:
+        await update.message.reply_text("Использование: /imagine <описание>\nПример: /imagine кот в космосе")
+        return
+    prompt = " ".join(context.args)
+    # Pollinations API: https://image.pollinations.ai/prompt/...
+    encoded_prompt = urllib.parse.quote(prompt)
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
+    await update.message.reply_photo(photo=image_url, caption=f"🎨 Генерация по запросу: {prompt}")
+    
 # ==================== ГРУППОВЫЕ ФУНКЦИИ ====================
 async def get_group_settings(group_id: int):
     async with db_pool.acquire() as conn:
@@ -1111,6 +1189,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/deltrigger <id> — удалить триггер\n"
         "/groupstats — статистика активности\n"
         "/group_history — последние 20 сообщений группы\n\n"
+        "/meme <шаблон> | <верх> | <низ> — создать мем\n"
+        "/gpt <запрос> — генерация текста (стихи, шутки)\n"
+        "/imagine <описание> — генерация картинки (экспериментально)\n"
         "В группе бот отвечает на сообщения, содержащие слово 'Кай' (в любом месте текста), анализируя контекст последних сообщений.\n\n"
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
@@ -1433,6 +1514,9 @@ async def main():
     bot_app.add_handler(CallbackQueryHandler(quiz_callback, pattern="^quiz_"))
     bot_app.add_handler(CallbackQueryHandler(casino_callback, pattern="^(casino_|roulette_)"))
     bot_app.add_handler(CallbackQueryHandler(ttt_callback, pattern="^ttt_"))
+    bot_app.add_handler(CommandHandler("meme", meme_command))
+    bot_app.add_handler(CommandHandler("gpt", gpt_command))
+    bot_app.add_handler(CommandHandler("imagine", imagine_command))  # опционально
     # Групповые команды
     bot_app.add_handler(CommandHandler("setwelcome", set_welcome))
     bot_app.add_handler(CommandHandler("set_cleanup", set_cleanup))
