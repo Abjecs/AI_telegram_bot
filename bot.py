@@ -933,8 +933,8 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = "https://api.imgflip.com/caption_image"
     params = {
         "template_id": template_id,
-        "username": "telegram_bot",
-        "password": "dummy",
+        "username": "AbjecsI",
+        "password": "13579lehagfs67",
         "text0": top_text,
         "text1": bottom_text,
         "font": "impact"
