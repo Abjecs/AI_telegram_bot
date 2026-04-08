@@ -66,6 +66,7 @@ async def init_db():
             END
             $$;
         ''')
+        # Таблица сообщений (личные)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
@@ -77,6 +78,7 @@ async def init_db():
                 timestamp TEXT
             )
         ''')
+        # Таблица напоминаний
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS reminders (
                 id SERIAL PRIMARY KEY,
@@ -86,6 +88,7 @@ async def init_db():
                 status TEXT DEFAULT 'active'
             )
         ''')
+        # Таблица кэша поиска
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS search_cache (
                 id SERIAL PRIMARY KEY,
@@ -96,6 +99,7 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         ''')
+        # Таблицы для групп
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS group_settings (
                 group_id BIGINT PRIMARY KEY,
@@ -134,6 +138,7 @@ async def init_db():
                 timestamp TIMESTAMP DEFAULT NOW()
             )
         ''')
+        # Новая таблица для облачного хранилища
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS user_files (
                 id SERIAL PRIMARY KEY,
@@ -499,23 +504,14 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
     photo = update.message.photo[-1] if update.message.photo else None
     video = update.message.video
     if document:
-        file = document
-        file_name = file.file_name or "file"
-        mime_type = file.mime_type or "application/octet-stream"
-        file_size = file.file_size
-        file_id = file.file_id
+        file_name = document.file_name or "file"
+        file_size = document.file_size
     elif photo:
-        file = photo
         file_name = f"photo_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-        mime_type = "image/jpeg"
-        file_size = file.file_size
-        file_id = file.file_id
+        file_size = photo.file_size
     elif video:
-        file = video
         file_name = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-        mime_type = "video/mp4"
-        file_size = file.file_size
-        file_id = file.file_id
+        file_size = video.file_size
     else:
         await update.message.reply_text("❌ Неподдерживаемый тип файла. Отправьте документ, фото или видео.")
         return
@@ -530,11 +526,13 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
+        # Копируем сообщение с файлом в канал
         sent = await context.bot.copy_message(
             chat_id=int(STORAGE_CHANNEL_ID),
             from_chat_id=update.effective_chat.id,
             message_id=update.message.message_id
         )
+        # Получаем file_id из пересланного сообщения
         if sent.document:
             new_file_id = sent.document.file_id
             new_file_name = sent.document.file_name or file_name
@@ -548,7 +546,7 @@ async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("❌ Не удалось определить тип файла после пересылки.")
             return
 
-        await save_file(user_id, new_file_id, new_file_name, file_size, mime_type)
+        await save_file(user_id, new_file_id, new_file_name, file_size, "application/octet-stream")
         await update.message.reply_text(f"✅ Файл '{new_file_name}' загружен в облако. Используйте /files для просмотра.")
     except Exception as e:
         logging.error(f"Ошибка при пересылке файла в канал: {e}")
@@ -645,7 +643,8 @@ async def get_group_history(group_id: int, limit: int = 10):
 
 async def cleanup_old_group_messages(group_id: int, days: int):
     async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - INTERVAL '$2 days'", group_id, days)
+        # Исправлено: вместо интервала с подстановкой используем конкатенацию или параметр
+        await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - ($2 || ' days')::INTERVAL", group_id, days)
 
 async def is_group_admin(update: Update, user_id: int) -> bool:
     chat_member = await update.effective_chat.get_member(user_id)
@@ -975,12 +974,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     username = update.effective_user.username or "NoUsername"
 
+    # ЛИЧНАЯ ПЕРЕПИСКА
     if chat_type == "private":
+        # Если есть файл (документ, фото, видео) – обрабатываем загрузку
         if update.message.document or update.message.photo or update.message.video:
             await handle_file_upload(update, context)
             return
+        # Если нет текста и нет файла – игнорируем
         if not user_message:
             return
+        # Обычный текст – отвечаем через GigaChat
         style_key = await get_user_style(user_id)
         style_prompt = STYLES[style_key]["prompt"]
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -1000,6 +1003,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Ошибка при обращении к GigaChat. Попробуйте позже.")
         return
 
+    # ГРУППОВАЯ ЛОГИКА
     if chat_type in ["group", "supergroup"]:
         group_id = update.effective_chat.id
         await save_group_message(group_id, user_id, username, user_message or "(медиа)")
@@ -1064,7 +1068,7 @@ async def cleanup_group_messages_job():
                 groups = await conn.fetch("SELECT group_id, cleanup_days FROM group_settings WHERE cleanup_days IS NOT NULL")
                 for g in groups:
                     days = g["cleanup_days"]
-                    await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - INTERVAL '$2 days'", g["group_id"], days)
+                    await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - ($2 || ' days')::INTERVAL", g["group_id"], days)
                     logging.info(f"Очистка группы {g['group_id']}: удалены сообщения старше {days} дней")
         except Exception as e:
             logging.error(f"Ошибка автоочистки: {e}")
