@@ -18,7 +18,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "default123")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 TGSTAT_TOKEN = os.getenv("TGSTAT_API_TOKEN", "")
-STORAGE_CHANNEL_ID = os.getenv("-1003868789392")
+STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID")
 PORT = int(os.environ.get("PORT", 8080))
 
 if not TELEGRAM_TOKEN or not GIGACHAT_CREDENTIALS or not DATABASE_URL:
