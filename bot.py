@@ -1461,8 +1461,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
     if role == "admin":
-        text += "\n\nАдмин-команды:\n/setrole <user_id> <role>\n/ban <user_id>\n/unban <user_id>\n/users\n/stats\n/history"
-    await update.message.reply_text(text)
+        text += "\n\nАдмин-команды:\n/setrole <user_id> <role>\n/ban <user_id>\n/unban <user_id>\n/users\n/stats\n/history\n/backup — создать резервную копию базы данных"
+        await update.message.reply_text(text)
 
 async def auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -1606,6 +1606,56 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"🤖 Бот: {row['bot_reply'][:50]}\n"
         text += f"🕒 {row['timestamp']}\n\n"
     await update.message.reply_text(text[:4000])
+
+@require_role(["admin"])
+async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создаёт резервную копию базы данных и отправляет админу."""
+    await update.message.reply_text("🔄 Создаю резервную копию базы данных...")
+    try:
+        async with db_pool.acquire() as conn:
+            # Получаем список всех таблиц в схеме public
+            tables = await conn.fetch("""
+                SELECT tablename FROM pg_tables 
+                WHERE schemaname = 'public' 
+                ORDER BY tablename
+            """)
+            if not tables:
+                await update.message.reply_text("❌ Нет таблиц для бэкапа.")
+                return
+            backup_lines = []
+            for table in tables:
+                table_name = table["tablename"]
+                rows = await conn.fetch(f"SELECT * FROM {table_name}")
+                if rows:
+                    for row in rows:
+                        columns = list(row.keys())
+                        values = []
+                        for col in columns:
+                            val = row[col]
+                            if val is None:
+                                values.append("NULL")
+                            elif isinstance(val, (int, float)):
+                                values.append(str(val))
+                            else:
+                                escaped = str(val).replace("'", "''")
+                                values.append(f"'{escaped}'")
+                        columns_str = ", ".join(columns)
+                        values_str = ", ".join(values)
+                        backup_lines.append(f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});")
+                else:
+                    backup_lines.append(f"-- Таблица {table_name} пуста")
+            dump_text = "\n".join(backup_lines)
+            if len(dump_text) > 40 * 1024 * 1024:  # 40 МБ
+                await update.message.reply_text("❌ Дамп слишком большой для отправки через Telegram. Используйте ручной бэкап через Supabase.")
+                return
+            from io import BytesIO
+            file_obj = BytesIO(dump_text.encode("utf-8"))
+            file_obj.name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql"
+            await update.message.reply_document(document=file_obj, filename=file_obj.name)
+            await update.message.reply_text("✅ Резервная копия создана и отправлена.")
+    except Exception as e:
+        logging.error(f"Backup error: {e}")
+        await update.message.reply_text(f"❌ Ошибка создания резервной копии: {e}")
 
 # ==================== СТИЛИ (кнопки) ====================
 async def style_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1862,7 +1912,7 @@ async def main():
     bot_app.add_handler(CommandHandler("users", users_list))
     bot_app.add_handler(CommandHandler("stats", stats))
     bot_app.add_handler(CommandHandler("history", history))
-    bot_app.add_handler(CommandHandler("backup", backup_command))
+    bot_app.add_handler(CommandHandler("backup", backup))
 
     await bot_app.initialize()
     await bot_app.start()
