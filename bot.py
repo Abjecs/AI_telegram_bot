@@ -1728,11 +1728,11 @@ async def cleanup_group_messages_job():
                 groups = await conn.fetch("SELECT group_id, cleanup_days FROM group_settings WHERE cleanup_days IS NOT NULL")
                 for g in groups:
                     days = g["cleanup_days"]
-                    await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - $2 * INTERVAL '1 day'", group_id, days)
+                    await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - $2 * INTERVAL '1 day'", g["group_id"], days)
                     logging.info(f"Очистка группы {g['group_id']}: удалены сообщения старше {days} дней")
         except Exception as e:
             logging.error(f"Ошибка автоочистки: {e}")
-
+            
 # ==================== WEBHOOK И HTTP ====================
 async def handle_webhook(request):
     try:
