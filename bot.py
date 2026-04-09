@@ -1027,6 +1027,183 @@ async def gif_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_animation(animation=url, caption=f"🎬 GIF по запросу: {query}")
     else:
         await update.message.reply_text("❌ GIF не найден. Попробуйте другой запрос.")
+
+# ==================== ПОГОДА (OpenWeatherMap) ====================
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
+if not WEATHER_API_KEY:
+    logging.warning("WEATHER_API_KEY not set, /weather will not work")
+
+async def get_weather(city: str) -> str:
+    if not WEATHER_API_KEY:
+        return "❌ API ключ погоды не настроен."
+    url = "https://api.openweathermap.org/data/2.5/weather"
+    params = {
+        "q": city,
+        "appid": WEATHER_API_KEY,
+        "units": "metric",
+        "lang": "ru"
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return f"❌ Город '{city}' не найден."
+                data = await resp.json()
+                temp = data["main"]["temp"]
+                feels = data["main"]["feels_like"]
+                desc = data["weather"][0]["description"]
+                humidity = data["main"]["humidity"]
+                wind = data["wind"]["speed"]
+                return f"🌤 Погода в {city}:\n🌡 {temp:.1f}°C (ощущается {feels:.1f}°C)\n📖 {desc}\n💧 Влажность: {humidity}%\n💨 Ветер: {wind} м/с"
+        except Exception as e:
+            logging.error(f"Weather error: {e}")
+            return "❌ Ошибка получения погоды."
+
+async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /weather <город>\nПример: /weather Москва")
+        return
+    city = " ".join(context.args)
+    await update.message.reply_text("🔍 Узнаю погоду...")
+    result = await get_weather(city)
+    await update.message.reply_text(result)
+
+# ===# ==================== КУРСЫ ВАЛЮТ (ЦБ РФ) ====================
+CBR_API_URL = "https://www.cbr-xml-daily.ru/daily_json.js"
+# Словарь популярных валют, недоступных в API ЦБ (например, криптовалюты)
+# Для них можно настроить отдельный источник или выводить сообщение о недоступности.
+EXTRA_CURRENCIES = {
+    "BTC": "Биткоин",
+    "ETH": "Эфириум",
+    "USDT": "Tether",
+    "TON": "Toncoin",
+    "BNB": "Binance Coin",
+    "SOL": "Solana",
+    "XRP": "Ripple",
+    "DOGE": "Dogecoin",
+    "ADA": "Cardano",
+    "TRX": "Tron",
+}
+
+async def get_cbr_currency_rate(currency_code: str) -> float | None:
+    """
+    Получает курс валюты к рублю с сайта ЦБ РФ.
+    Возвращает курс как число (сколько стоит 1 единица валюты в рублях).
+    Например, для USD вернёт ~96.5, для EUR ~105.0.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(CBR_API_URL) as response:
+                if response.status != 200:
+                    logging.error(f"CBR API error: status {response.status}")
+                    return None
+                data = await response.json()
+                valute_data = data.get("Valute", {})
+                if currency_code in valute_data:
+                    # Курс в JSON хранится как курс за единицу валюты.
+                    # Например, для USD: "Value": 96.5, "Nominal": 1
+                    # Для JPY: "Value": 64.0, "Nominal": 100. Значит 1 иена = 0.64 руб.
+                    rate_value = valute_data[currency_code]["Value"]
+                    nominal = valute_data[currency_code]["Nominal"]
+                    return rate_value / nominal
+                else:
+                    logging.warning(f"Currency {currency_code} not found in CBR data")
+                    return None
+    except Exception as e:
+        logging.error(f"Error fetching CBR rates: {e}")
+        return None
+
+async def currency_convert(amount: float, from_cur: str, to_cur: str) -> str:
+    """Конвертирует сумму из одной валюты в другую, используя официальный курс ЦБ РФ."""
+    # Если обе валюты — рубли, сразу возвращаем результат
+    if from_cur == "RUB" and to_cur == "RUB":
+        return f"💱 {amount} RUB = {amount:.2f} RUB"
+
+    # Проверяем, не являются ли валюты криптовалютами (недоступны в ЦБ)
+    if from_cur in EXTRA_CURRENCIES or to_cur in EXTRA_CURRENCIES:
+        return f"❌ К сожалению, API ЦБ РФ не поддерживает конвертацию криптовалют. Доступные валюты: все официальные валюты стран."
+
+    # Приводим валюты к верхнему регистру для стандартизации
+    from_cur = from_cur.upper()
+    to_cur = to_cur.upper()
+
+    # Если валюта не RUB, получаем её курс к рублю
+    from_rate = 1.0 if from_cur == "RUB" else await get_cbr_currency_rate(from_cur)
+    to_rate = 1.0 if to_cur == "RUB" else await get_cbr_currency_rate(to_cur)
+
+    if from_rate is None:
+        return f"❌ Не удалось найти курс для валюты {from_cur}. Возможно, она не поддерживается ЦБ РФ."
+    if to_rate is None:
+        return f"❌ Не удалось найти курс для валюты {to_cur}. Возможно, она не поддерживается ЦБ РФ."
+
+    # Сначала переводим сумму в рубли, затем в целевую валюту
+    amount_in_rub = amount * from_rate
+    converted_amount = amount_in_rub / to_rate
+
+    return f"💱 {amount:.2f} {from_cur} = {converted_amount:.2f} {to_cur} (по курсу ЦБ РФ)"
+
+async def currency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает команду /currency для конвертации валют."""
+    if len(context.args) != 3:
+        await update.message.reply_text(
+            "Использование: /currency <сумма> <из> <в>\n"
+            "Пример: /currency 100 USD RUB\n\n"
+            "Доступные валюты: все официальные валюты, кроме криптовалют."
+        )
+        return
+    try:
+        amount = float(context.args[0])
+        from_cur = context.args[1].upper()
+        to_cur = context.args[2].upper()
+        await update.message.reply_text("💱 Конвертирую по курсу ЦБ РФ...")
+        result = await currency_convert(amount, from_cur, to_cur)
+        await update.message.reply_text(result)
+    except ValueError:
+        await update.message.reply_text("Ошибка: сумма должна быть числом. Например: 100.5")
+    except Exception as e:
+        logging.error(f"Currency command error: {e}")
+        await update.message.reply_text("❌ Произошла непредвиденная ошибка. Попробуйте позже.")
+        
+# ==================== КРИПТОВАЛЮТЫ (CoinGecko) ====================
+async def crypto_price(symbol: str) -> str:
+    mapping = {
+        "BTC": "bitcoin",
+        "ETH": "ethereum",
+        "BNB": "binancecoin",
+        "SOL": "solana",
+        "XRP": "ripple",
+        "DOGE": "dogecoin",
+        "ADA": "cardano",
+        "TRX": "tron",
+        "TON": "the-open-network"
+    }
+    coin_id = mapping.get(symbol.upper())
+    if not coin_id:
+        return f"❌ Неизвестная криптовалюта. Доступны: {', '.join(mapping.keys())}"
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd&include_24hr_change=true"
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                if coin_id in data:
+                    price = data[coin_id]["usd"]
+                    change = data[coin_id].get("usd_24h_change", 0)
+                    sign = "+" if change >= 0 else ""
+                    return f"💰 {symbol.upper()}: ${price:.2f}\n📈 24ч: {sign}{change:.2f}%"
+                else:
+                    return "❌ Данные не найдены."
+        except Exception as e:
+            logging.error(f"Crypto error: {e}")
+            return "❌ Ошибка получения курса."
+
+async def crypto_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Использование: /crypto <символ>\nПример: /crypto BTC")
+        return
+    symbol = context.args[0].upper()
+    await update.message.reply_text("📊 Запрашиваю курс...")
+    result = await crypto_price(symbol)
+    await update.message.reply_text(result)
     
 # ==================== ГРУППОВЫЕ ФУНКЦИИ ====================
 async def get_group_settings(group_id: int):
@@ -1235,6 +1412,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/gpt <запрос> — генерация текста (стихи, шутки)\n"
         "/imagine <описание> — генерация картинки (экспериментально)\n"
         "/gif <запрос> — поиск GIF\n"
+        "/weather <город> — погода сейчас\n"
+        "/currency <сумма> <из> <в> — конвертация валют\n"
+        "/crypto <символ> — курс криптовалюты (BTC, ETH, SOL...)\n"
         "В группе бот отвечает на сообщения, содержащие слово 'Кай' (в любом месте текста), анализируя контекст последних сообщений.\n\n"
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
@@ -1561,6 +1741,9 @@ async def main():
     bot_app.add_handler(CommandHandler("gpt", gpt_command))
     bot_app.add_handler(CommandHandler("imagine", imagine_command))  # опционально
     bot_app.add_handler(CommandHandler("gif", gif_command))
+    bot_app.add_handler(CommandHandler("weather", weather_command))
+    bot_app.add_handler(CommandHandler("currency", currency_command))
+    bot_app.add_handler(CommandHandler("crypto", crypto_command))
     # Групповые команды
     bot_app.add_handler(CommandHandler("setwelcome", set_welcome))
     bot_app.add_handler(CommandHandler("set_cleanup", set_cleanup))
