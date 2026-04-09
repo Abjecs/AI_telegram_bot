@@ -1067,28 +1067,26 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Узнаю погоду...")
     result = await get_weather(city)
     await update.message.reply_text(result)
-
+    
 # ==================== АНАЛИЗ ДОКУМЕНТОВ ====================
 import io
 import aiofiles
 import tempfile
 import os
-import PyMuPDF  # pip install PyMuPDF
-from docx import Document  # pip install python-docx
+import fitz  # PyMuPDF
+from docx import Document
 
 async def extract_text_from_document(file_id: str, context: ContextTypes.DEFAULT_TYPE) -> str:
     """Скачивает файл и извлекает текст в зависимости от типа."""
     file = await context.bot.get_file(file_id)
-    # Скачиваем в временный файл
     with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
         await file.download_to_drive(tmp.name)
         tmp_path = tmp.name
     try:
-        # Определяем тип по расширению или MIME (упрощённо по имени)
         ext = os.path.splitext(file.file_path or "")[1].lower()
         text = ""
         if ext == ".pdf":
-            doc = PyMuDF.open(tmp_path)
+            doc = fitz.open(tmp_path)
             for page in doc:
                 text += page.get_text()
             doc.close()
@@ -1112,7 +1110,6 @@ async def extract_text_from_document(file_id: str, context: ContextTypes.DEFAULT
 
 async def analyze_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик для команды /analyze (ответ на сообщение с файлом)."""
-    # Проверяем, есть ли файл в ответе или в текущем сообщении
     if update.message.reply_to_message and update.message.reply_to_message.document:
         file = update.message.reply_to_message.document
         file_id = file.file_id
@@ -1127,10 +1124,8 @@ async def analyze_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith("❌"):
         await update.message.reply_text(text)
         return
-    # Обрезаем текст, если слишком длинный (GigaChat имеет лимит)
     if len(text) > 8000:
         text = text[:8000] + "\n...[текст обрезан]"
-    # Отправляем в GigaChat для суммаризации
     try:
         async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
             messages = [
