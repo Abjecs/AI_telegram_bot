@@ -1732,6 +1732,66 @@ async def cleanup_group_messages_job():
                     logging.info(f"Очистка группы {g['group_id']}: удалены сообщения старше {days} дней")
         except Exception as e:
             logging.error(f"Ошибка автоочистки: {e}")
+
+# ==================== РЕЗЕРВНОЕ КОПИРОВАНИЕ (без pg_dump) ====================
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    role = await get_user_role(user_id)
+    if role != "admin":
+        await update.message.reply_text("⛔ Только администратор может создавать резервные копии.")
+        return
+    await update.message.reply_text("🔄 Создаю резервную копию базы данных (текстовый дамп)...")
+    try:
+        async with db_pool.acquire() as conn:
+            # Получаем список всех таблиц (исключая служебные)
+            tables = await conn.fetch("""
+                SELECT tablename FROM pg_tables 
+                WHERE schemaname = 'public' 
+                ORDER BY tablename
+            """)
+            if not tables:
+                await update.message.reply_text("❌ Нет таблиц для бэкапа.")
+                return
+            backup_lines = []
+            for table in tables:
+                table_name = table["tablename"]
+                # Получаем все строки из таблицы
+                rows = await conn.fetch(f"SELECT * FROM {table_name}")
+                if rows:
+                    # Формируем INSERT-запросы
+                    for row in rows:
+                        columns = list(row.keys())
+                        values = []
+                        for col in columns:
+                            val = row[col]
+                            if val is None:
+                                values.append("NULL")
+                            elif isinstance(val, (int, float)):
+                                values.append(str(val))
+                            else:
+                                # Экранируем строки и даты
+                                escaped = str(val).replace("'", "''")
+                                values.append(f"'{escaped}'")
+                        columns_str = ", ".join(columns)
+                        values_str = ", ".join(values)
+                        backup_lines.append(f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});")
+                else:
+                    backup_lines.append(f"-- Таблица {table_name} пуста")
+            # Формируем текст дампа
+            dump_text = "\n".join(backup_lines)
+            # Если дамп слишком большой, обрезаем (Telegram лимит 50 МБ, но у нас вряд ли)
+            if len(dump_text) > 40 * 1024 * 1024:  # 40 МБ
+                await update.message.reply_text("❌ Дамп слишком большой для отправки через Telegram. Используйте ручной бэкап через Supabase.")
+                return
+            # Отправляем файл
+            from io import BytesIO
+            file_obj = BytesIO(dump_text.encode("utf-8"))
+            file_obj.name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql"
+            await update.message.reply_document(document=file_obj, filename=file_obj.name)
+            await update.message.reply_text("✅ Резервная копия создана и отправлена.")
+    except Exception as e:
+        logging.error(f"Backup error: {e}")
+        await update.message.reply_text(f"❌ Ошибка создания резервной копии: {e}")
             
 # ==================== WEBHOOK И HTTP ====================
 async def handle_webhook(request):
@@ -1802,6 +1862,7 @@ async def main():
     bot_app.add_handler(CommandHandler("users", users_list))
     bot_app.add_handler(CommandHandler("stats", stats))
     bot_app.add_handler(CommandHandler("history", history))
+    bot_app.add_handler(CommandHandler("backup", backup_command))
 
     await bot_app.initialize()
     await bot_app.start()
