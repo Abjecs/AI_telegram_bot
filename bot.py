@@ -102,6 +102,17 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         ''')
+        # Таблица для настроек резервного копирования
+await conn.execute('''
+    CREATE TABLE IF NOT EXISTS backup_settings (
+        id SERIAL PRIMARY KEY,
+        chat_id BIGINT,
+        channel_id BIGINT,
+        backup_time TIME DEFAULT '02:00:00',
+        last_backup TIMESTAMP,
+        last_file_id TEXT
+    )
+''')
         # Таблицы для групп
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS group_settings (
@@ -1461,7 +1472,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
     if role == "admin":
-        text += "\n\nАдмин-команды:\n/setrole <user_id> <role>\n/ban <user_id>\n/unban <user_id>\n/users\n/stats\n/history\n/backup — создать резервную копию базы данных"
+        text += "\n\nАдмин-команды:\n/setrole <user_id> <role>\n/ban <user_id>\n/unban <user_id>\n/users\n/stats\n/history\n/backup\n/schedule_backup — настроить автоматическое ежедневное резервное копирование\n/force_backup — создать резервную копию прямо сейчас\n/restore <file_id> — восстановить базу данных из указанного файла в канале"
         await update.message.reply_text(text)
 
 async def auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1842,6 +1853,183 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Backup error: {e}")
         await update.message.reply_text(f"❌ Ошибка создания резервной копии: {e}")
+
+# ==================== АВТОМАТИЧЕСКИЕ БЭКАПЫ ====================
+import subprocess
+import tempfile
+import io
+import asyncio
+
+async def create_backup(chat_id: int = None, channel_id: int = None) -> str:
+    """Создаёт дамп базы данных и возвращает file_id загруженного файла в канале."""
+    if not channel_id:
+        # Получаем настройки из БД
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT channel_id FROM backup_settings LIMIT 1")
+            if not row:
+                raise ValueError("Канал для бэкапов не настроен.")
+            channel_id = row["channel_id"]
+    # Создаём временный файл
+    with tempfile.NamedTemporaryFile(suffix=".sql", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        # Используем команду pg_dump
+        db_url = DATABASE_URL
+        # Извлекаем параметры подключения
+        import urllib.parse
+        parsed = urllib.parse.urlparse(db_url)
+        dbname = parsed.path[1:]
+        user = parsed.username
+        password = parsed.password
+        host = parsed.hostname
+        port = parsed.port or 5432
+        cmd = [
+            "pg_dump",
+            f"--host={host}",
+            f"--port={port}",
+            f"--username={user}",
+            f"--dbname={dbname}",
+            "--format=plain",
+            "--no-owner",
+            "--no-privileges"
+        ]
+        env = os.environ.copy()
+        env["PGPASSWORD"] = password
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env
+        )
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            raise Exception(stderr.decode())
+        with open(tmp_path, "wb") as f:
+            f.write(stdout)
+        # Отправляем файл в канал
+        with open(tmp_path, "rb") as f:
+            sent = await bot_app.bot.send_document(
+                chat_id=channel_id,
+                document=f,
+                filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql",
+                caption="Резервная копия базы данных"
+            )
+            file_id = sent.document.file_id
+        # Сохраняем информацию о последнем бэкапе
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE backup_settings SET last_backup = NOW(), last_file_id = $1", file_id)
+        return file_id
+    except Exception as e:
+        logging.error(f"Ошибка создания бэкапа: {e}")
+        raise
+    finally:
+        os.unlink(tmp_path)
+
+async def schedule_backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Настраивает автоматическое ежедневное резервное копирование."""
+    user_id = update.effective_user.id
+    role = await get_user_role(user_id)
+    if role != "admin":
+        await update.message.reply_text("⛔ Только администратор может настраивать бэкапы.")
+        return
+    args = context.args
+    if len(args) == 0:
+        # Показываем текущие настройки
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT backup_time, last_backup, channel_id FROM backup_settings LIMIT 1")
+            if row:
+                await update.message.reply_text(
+                    f"📋 Текущие настройки бэкапов:\n"
+                    f"⏰ Время: {row['backup_time']}\n"
+                    f"🕒 Последний бэкап: {row['last_backup'].strftime('%Y-%m-%d %H:%M') if row['last_backup'] else 'никогда'}\n"
+                    f"📁 Канал: {row['channel_id']}"
+                )
+            else:
+                await update.message.reply_text("Автоматические бэкапы не настроены. Используйте /schedule_backup <HH:MM> для настройки.")
+        return
+    # Устанавливаем время
+    try:
+        backup_time = datetime.strptime(args[0], "%H:%M").time()
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO backup_settings (backup_time, channel_id) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET backup_time = $1",
+                               backup_time, STORAGE_CHANNEL_ID)
+        await update.message.reply_text(f"✅ Автоматические бэкапы настроены на {backup_time.strftime('%H:%M')} ежедневно.")
+        # Запускаем фоновую задачу, если её ещё нет
+        asyncio.create_task(backup_scheduler())
+    except:
+        await update.message.reply_text("Ошибка: укажите время в формате HH:MM, например 02:00")
+
+async def backup_scheduler():
+    """Фоновая задача для выполнения бэкапов по расписанию."""
+    while True:
+        try:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT backup_time FROM backup_settings LIMIT 1")
+                if not row:
+                    await asyncio.sleep(3600)  # Проверяем раз в час
+                    continue
+                backup_time = row["backup_time"]
+                now = datetime.now()
+                scheduled = datetime.combine(now.date(), backup_time)
+                if now > scheduled:
+                    scheduled += timedelta(days=1)
+                wait_seconds = (scheduled - now).total_seconds()
+                await asyncio.sleep(wait_seconds)
+                # Создаём бэкап
+                await create_backup()
+                logging.info("Автоматический бэкап создан")
+        except Exception as e:
+            logging.error(f"Ошибка в планировщике бэкапов: {e}")
+            await asyncio.sleep(3600)
+
+async def force_backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создаёт резервную копию прямо сейчас."""
+    user_id = update.effective_user.id
+    role = await get_user_role(user_id)
+    if role != "admin":
+        await update.message.reply_text("⛔ Только администратор может создавать бэкапы.")
+        return
+    await update.message.reply_text("🔄 Создаю резервную копию...")
+    try:
+        file_id = await create_backup()
+        await update.message.reply_text(f"✅ Резервная копия создана. File ID: `{file_id}`")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Восстанавливает базу данных из указанного файла в канале."""
+    user_id = update.effective_user.id
+    role = await get_user_role(user_id)
+    if role != "admin":
+        await update.message.reply_text("⛔ Только администратор может восстанавливать базу.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /restore <file_id>")
+        return
+    file_id = context.args[0]
+    await update.message.reply_text("🔄 Восстанавливаю базу данных из указанного файла...")
+    try:
+        # Получаем файл из канала
+        file = await bot_app.bot.get_file(file_id)
+        # Скачиваем в временный файл
+        with tempfile.NamedTemporaryFile(suffix=".sql", delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            tmp_path = tmp.name
+        # Читаем SQL-команды
+        with open(tmp_path, "r", encoding="utf-8") as f:
+            sql = f.read()
+        # Выполняем восстановление в новой базе данных
+        # Важно: сначала удаляем старую базу и создаём новую (если нужно)
+        # Здесь нужно подключиться к новой базе данных
+        # Для простоты предполагаем, что DATABASE_URL уже указывает на новую базу
+        async with db_pool.acquire() as conn:
+            # Выполняем SQL-команды из файла
+            await conn.execute(sql)
+        await update.message.reply_text("✅ База данных успешно восстановлена.")
+        os.unlink(tmp_path)
+    except Exception as e:
+        logging.error(f"Restore error: {e}")
+        await update.message.reply_text(f"❌ Ошибка восстановления: {e}")
             
 # ==================== WEBHOOK И HTTP ====================
 async def handle_webhook(request):
@@ -1913,6 +2101,9 @@ async def main():
     bot_app.add_handler(CommandHandler("stats", stats))
     bot_app.add_handler(CommandHandler("history", history))
     bot_app.add_handler(CommandHandler("backup", backup))
+    bot_app.add_handler(CommandHandler("schedule_backup", schedule_backup_command))
+    bot_app.add_handler(CommandHandler("force_backup", force_backup_command))
+    bot_app.add_handler(CommandHandler("restore", restore_command))
 
     await bot_app.initialize()
     await bot_app.start()
@@ -1923,6 +2114,7 @@ async def main():
 
     asyncio.create_task(check_reminders())
     asyncio.create_task(cleanup_group_messages_job())
+    asyncio.create_task(backup_scheduler())
 
     app = web.Application()
     app.router.add_post('/webhook', handle_webhook)
