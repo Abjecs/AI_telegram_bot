@@ -1145,101 +1145,70 @@ async def analyze_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Analysis error: {e}")
         await update.message.reply_text("❌ Ошибка при анализе документа через GigaChat.")
 
-# ===# ==================== КУРСЫ ВАЛЮТ (ЦБ РФ) ====================
-CBR_API_URL = "https://www.cbr-xml-daily.ru/daily_json.js"
-# Словарь популярных валют, недоступных в API ЦБ (например, криптовалюты)
-# Для них можно настроить отдельный источник или выводить сообщение о недоступности.
-EXTRA_CURRENCIES = {
-    "BTC": "Биткоин",
-    "ETH": "Эфириум",
-    "USDT": "Tether",
-    "TON": "Toncoin",
-    "BNB": "Binance Coin",
-    "SOL": "Solana",
-    "XRP": "Ripple",
-    "DOGE": "Dogecoin",
-    "ADA": "Cardano",
-    "TRX": "Tron",
-}
-
-async def get_cbr_currency_rate(currency_code: str) -> float | None:
-    """
-    Получает курс валюты к рублю с сайта ЦБ РФ.
-    Возвращает курс как число (сколько стоит 1 единица валюты в рублях).
-    Например, для USD вернёт ~96.5, для EUR ~105.0.
-    """
+# ==================== КУРСЫ ВАЛЮТ (exchangerate.host) ====================
+async def get_currency_rate(currency_code: str, to_rub: bool = True) -> float | None:
+    """Возвращает курс валюты к рублю (или обратно)."""
     try:
+        if to_rub:
+            url = f"https://api.exchangerate.host/convert?from={currency_code}&to=RUB&amount=1"
+        else:
+            url = f"https://api.exchangerate.host/convert?from=RUB&to={currency_code}&amount=1"
         async with aiohttp.ClientSession() as session:
-            async with session.get(CBR_API_URL) as response:
-                if response.status != 200:
-                    logging.error(f"CBR API error: status {response.status}")
+            async with session.get(url) as resp:
+                if resp.status != 200:
                     return None
-                data = await response.json()
-                valute_data = data.get("Valute", {})
-                if currency_code in valute_data:
-                    # Курс в JSON хранится как курс за единицу валюты.
-                    # Например, для USD: "Value": 96.5, "Nominal": 1
-                    # Для JPY: "Value": 64.0, "Nominal": 100. Значит 1 иена = 0.64 руб.
-                    rate_value = valute_data[currency_code]["Value"]
-                    nominal = valute_data[currency_code]["Nominal"]
-                    return rate_value / nominal
-                else:
-                    logging.warning(f"Currency {currency_code} not found in CBR data")
-                    return None
+                data = await resp.json()
+                if data.get("success"):
+                    return data["result"]
+                return None
     except Exception as e:
-        logging.error(f"Error fetching CBR rates: {e}")
+        logging.error(f"Error fetching rate: {e}")
         return None
 
 async def currency_convert(amount: float, from_cur: str, to_cur: str) -> str:
-    """Конвертирует сумму из одной валюты в другую, используя официальный курс ЦБ РФ."""
-    # Если обе валюты — рубли, сразу возвращаем результат
+    if from_cur == to_cur:
+        return f"💱 {amount:.2f} {from_cur} = {amount:.2f} {to_cur}"
     if from_cur == "RUB" and to_cur == "RUB":
-        return f"💱 {amount} RUB = {amount:.2f} RUB"
-
-    # Проверяем, не являются ли валюты криптовалютами (недоступны в ЦБ)
-    if from_cur in EXTRA_CURRENCIES or to_cur in EXTRA_CURRENCIES:
-        return f"❌ К сожалению, API ЦБ РФ не поддерживает конвертацию криптовалют. Доступные валюты: все официальные валюты стран."
-
-    # Приводим валюты к верхнему регистру для стандартизации
-    from_cur = from_cur.upper()
-    to_cur = to_cur.upper()
-
-    # Если валюта не RUB, получаем её курс к рублю
-    from_rate = 1.0 if from_cur == "RUB" else await get_cbr_currency_rate(from_cur)
-    to_rate = 1.0 if to_cur == "RUB" else await get_cbr_currency_rate(to_cur)
-
-    if from_rate is None:
-        return f"❌ Не удалось найти курс для валюты {from_cur}. Возможно, она не поддерживается ЦБ РФ."
-    if to_rate is None:
-        return f"❌ Не удалось найти курс для валюты {to_cur}. Возможно, она не поддерживается ЦБ РФ."
-
-    # Сначала переводим сумму в рубли, затем в целевую валюту
-    amount_in_rub = amount * from_rate
-    converted_amount = amount_in_rub / to_rate
-
-    return f"💱 {amount:.2f} {from_cur} = {converted_amount:.2f} {to_cur} (по курсу ЦБ РФ)"
+        return f"💱 {amount:.2f} RUB = {amount:.2f} RUB"
+    # Конвертируем через рубль
+    if from_cur != "RUB":
+        rate_from = await get_currency_rate(from_cur, to_rub=True)
+        if rate_from is None:
+            return f"❌ Не удалось получить курс для {from_cur}"
+        amount_in_rub = amount * rate_from
+    else:
+        amount_in_rub = amount
+    if to_cur != "RUB":
+        url = f"https://api.exchangerate.host/convert?from=RUB&to={to_cur}&amount={amount_in_rub}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return f"❌ Не удалось конвертировать в {to_cur}"
+                data = await resp.json()
+                if data.get("success"):
+                    converted = data["result"]
+                    return f"💱 {amount:.2f} {from_cur} = {converted:.2f} {to_cur}"
+                else:
+                    return "❌ Ошибка конвертации"
+    else:
+        return f"💱 {amount:.2f} {from_cur} = {amount_in_rub:.2f} RUB"
 
 async def currency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает команду /currency для конвертации валют."""
     if len(context.args) != 3:
-        await update.message.reply_text(
-            "Использование: /currency <сумма> <из> <в>\n"
-            "Пример: /currency 100 USD RUB\n\n"
-            "Доступные валюты: все официальные валюты, кроме криптовалют."
-        )
+        await update.message.reply_text("Использование: /currency <сумма> <из> <в>\nПример: /currency 100 USD RUB")
         return
     try:
         amount = float(context.args[0])
         from_cur = context.args[1].upper()
         to_cur = context.args[2].upper()
-        await update.message.reply_text("💱 Конвертирую по курсу ЦБ РФ...")
+        await update.message.reply_text("💱 Конвертирую...")
         result = await currency_convert(amount, from_cur, to_cur)
         await update.message.reply_text(result)
     except ValueError:
-        await update.message.reply_text("Ошибка: сумма должна быть числом. Например: 100.5")
+        await update.message.reply_text("Ошибка: сумма должна быть числом.")
     except Exception as e:
         logging.error(f"Currency command error: {e}")
-        await update.message.reply_text("❌ Произошла непредвиденная ошибка. Попробуйте позже.")
+        await update.message.reply_text("❌ Ошибка конвертации.")
         
 # ==================== КРИПТОВАЛЮТЫ (CoinGecko) ====================
 async def crypto_price(symbol: str) -> str:
@@ -1764,7 +1733,7 @@ async def cleanup_group_messages_job():
                 groups = await conn.fetch("SELECT group_id, cleanup_days FROM group_settings WHERE cleanup_days IS NOT NULL")
                 for g in groups:
                     days = g["cleanup_days"]
-                    await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - ($2 || ' days')::INTERVAL", g["group_id"], days)
+                    await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - $2 * INTERVAL '1 day'", group_id, days)
                     logging.info(f"Очистка группы {g['group_id']}: удалены сообщения старше {days} дней")
         except Exception as e:
             logging.error(f"Ошибка автоочистки: {e}")
