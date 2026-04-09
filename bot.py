@@ -11,6 +11,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler, CallbackQueryHandler
 from gigachat import GigaChat
 import asyncpg
+from io import BytesIO
 
 # ==================== КОНФИГУРАЦИЯ ====================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -103,16 +104,16 @@ async def init_db():
             )
         ''')
         # Таблица для настроек резервного копирования
-await conn.execute('''
-    CREATE TABLE IF NOT EXISTS backup_settings (
-        id SERIAL PRIMARY KEY,
-        chat_id BIGINT,
-        channel_id BIGINT,
-        backup_time TIME DEFAULT '02:00:00',
-        last_backup TIMESTAMP,
-        last_file_id TEXT
-    )
-''')
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS backup_settings (
+                id SERIAL PRIMARY KEY,
+                chat_id BIGINT,
+                channel_id BIGINT,
+                backup_time TIME DEFAULT '02:00:00',
+                last_backup TIMESTAMP,
+                last_file_id TEXT
+            )
+        ''')
         # Таблицы для групп
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS group_settings (
@@ -165,7 +166,6 @@ await conn.execute('''
             )
         ''')
         # НОВЫЕ ТАБЛИЦЫ ДЛЯ ИГР
-        # Викторины: вопросы и статистика
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS quiz_questions (
                 id SERIAL PRIMARY KEY,
@@ -181,20 +181,18 @@ await conn.execute('''
                 score INT DEFAULT 0
             )
         ''')
-        # Казино: внутренняя валюта (монеты)
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS casino_coins (
                 user_id BIGINT PRIMARY KEY,
                 coins INT DEFAULT 100
             )
         ''')
-        # Крестики-нолики: игровые сессии
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS tic_tac_toe (
                 chat_id BIGINT,
                 user_id BIGINT,
                 board TEXT,
-                turn TEXT, -- 'X' or 'O'
+                turn TEXT,
                 PRIMARY KEY (chat_id, user_id)
             )
         ''')
@@ -665,7 +663,6 @@ async def delete_file_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Ошибка при удалении файла.")
 
 # ==================== ИГРЫ ====================
-# 1. ВИКТОРИНА (Quiz)
 async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     role = await get_user_role(user_id)
@@ -726,7 +723,7 @@ async def quiz_score_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
             score = 0
     await update.message.reply_text(f"🏆 Ваш счёт в викторине: {score} очков.")
 
-# 2. КАЗИНО (кости / рулетка) – внутренняя валюта
+# 2. КАЗИНО
 async def get_coins(user_id: int) -> int:
     async with db_pool.acquire() as conn:
         val = await conn.fetchval("SELECT coins FROM casino_coins WHERE user_id = $1", user_id)
@@ -794,7 +791,7 @@ async def casino_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await add_coins(user_id, -10)
             await query.edit_message_text(f"❌ Не угадали. Число {result} ({actual_parity}). Вы проиграли 10 монет. Баланс: {coins - 10}")
 
-# 3. КРЕСТИКИ-НОЛИКИ (головоломка)
+# 3. КРЕСТИКИ-НОЛИКИ
 async def ttt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -926,7 +923,6 @@ import aiohttp
 import urllib.parse
 
 async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Генерация мема по шаблону."""
     if not context.args:
         await update.message.reply_text(
             "Использование: /meme <шаблон> | <верхний текст> | <нижний текст>\n"
@@ -934,7 +930,6 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Популярные шаблоны: 101440 (Distracted Boyfriend), 61579 (One Does Not Simply), 5496396 (Drake Hotline Bling)"
         )
         return
-    # Парсим аргументы: разделитель "|"
     args = " ".join(context.args).split("|")
     if len(args) < 2:
         await update.message.reply_text("Недостаточно аргументов. Используйте разделитель |")
@@ -967,7 +962,6 @@ async def meme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== ГЕНЕРАЦИЯ ТЕКСТА ЧЕРЕЗ GIGACHAT ====================
 async def gpt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Генерация текста (стихи, шутки, идеи)."""
     if not context.args:
         await update.message.reply_text("Использование: /gpt <запрос>\nПример: /gpt Напиши стих про кота")
         return
@@ -987,19 +981,17 @@ async def gpt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"GPT error: {e}")
         await update.message.reply_text("❌ Ошибка генерации текста.")
 
-# ==================== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (POLLINATIONS AI) – ОПЦИОНАЛЬНО ====================
+# ==================== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ====================
 async def imagine_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Генерация изображения через Pollinations AI (бесплатно)."""
     if not context.args:
         await update.message.reply_text("Использование: /imagine <описание>\nПример: /imagine кот в космосе")
         return
     prompt = " ".join(context.args)
-    # Pollinations API: https://image.pollinations.ai/prompt/...
     encoded_prompt = urllib.parse.quote(prompt)
     image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}"
     await update.message.reply_photo(photo=image_url, caption=f"🎨 Генерация по запросу: {prompt}")
 
-# ==================== GIF (GIPHY API) ====================
+# ==================== GIF ====================
 GIPHY_API_KEY = os.getenv("GIPHY_API_KEY", "")
 if not GIPHY_API_KEY:
     logging.warning("GIPHY_API_KEY not set, /gif command will not work")
@@ -1039,7 +1031,7 @@ async def gif_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ GIF не найден. Попробуйте другой запрос.")
 
-# ==================== ПОГОДА (OpenWeatherMap) ====================
+# ==================== ПОГОДА ====================
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "")
 if not WEATHER_API_KEY:
     logging.warning("WEATHER_API_KEY not set, /weather will not work")
@@ -1084,11 +1076,10 @@ import io
 import aiofiles
 import tempfile
 import os
-import fitz  # PyMuPDF
+import fitz
 from docx import Document
 
 async def extract_text_from_document(file_id: str, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Скачивает файл и извлекает текст в зависимости от типа."""
     file = await context.bot.get_file(file_id)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
         await file.download_to_drive(tmp.name)
@@ -1120,7 +1111,6 @@ async def extract_text_from_document(file_id: str, context: ContextTypes.DEFAULT
         os.unlink(tmp_path)
 
 async def analyze_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик для команды /analyze (ответ на сообщение с файлом)."""
     if update.message.reply_to_message and update.message.reply_to_message.document:
         file = update.message.reply_to_message.document
         file_id = file.file_id
@@ -1151,9 +1141,8 @@ async def analyze_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Analysis error: {e}")
         await update.message.reply_text("❌ Ошибка при анализе документа через GigaChat.")
 
-# ==================== КУРСЫ ВАЛЮТ (exchangerate.host) ====================
+# ==================== КУРСЫ ВАЛЮТ ====================
 async def get_currency_rate(currency_code: str, to_rub: bool = True) -> float | None:
-    """Возвращает курс валюты к рублю (или обратно)."""
     try:
         if to_rub:
             url = f"https://api.exchangerate.host/convert?from={currency_code}&to=RUB&amount=1"
@@ -1176,7 +1165,6 @@ async def currency_convert(amount: float, from_cur: str, to_cur: str) -> str:
         return f"💱 {amount:.2f} {from_cur} = {amount:.2f} {to_cur}"
     if from_cur == "RUB" and to_cur == "RUB":
         return f"💱 {amount:.2f} RUB = {amount:.2f} RUB"
-    # Конвертируем через рубль
     if from_cur != "RUB":
         rate_from = await get_currency_rate(from_cur, to_rub=True)
         if rate_from is None:
@@ -1216,7 +1204,7 @@ async def currency_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Currency command error: {e}")
         await update.message.reply_text("❌ Ошибка конвертации.")
         
-# ==================== КРИПТОВАЛЮТЫ (CoinGecko) ====================
+# ==================== КРИПТОВАЛЮТЫ ====================
 async def crypto_price(symbol: str) -> str:
     mapping = {
         "BTC": "bitcoin",
@@ -1303,7 +1291,7 @@ async def get_group_history(group_id: int, limit: int = 10):
 
 async def cleanup_old_group_messages(group_id: int, days: int):
     async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - ($2 || ' days')::INTERVAL", group_id, days)
+        await conn.execute("DELETE FROM group_messages WHERE group_id = $1 AND timestamp < NOW() - $2 * INTERVAL '1 day'", group_id, days)
 
 async def is_group_admin(update: Update, user_id: int) -> bool:
     chat_member = await update.effective_chat.get_member(user_id)
@@ -1468,12 +1456,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/currency <сумма> <из> <в> — конвертация валют\n"
         "/crypto <символ> — курс криптовалюты (BTC, ETH, SOL...)\n"
         "/analyze — ответьте на сообщение с документом (PDF, DOCX, TXT), чтобы получить краткое содержание\n"
+        "/schedule_backup <HH:MM> — настроить время автоматического бэкапа (по умолч. 02:00)\n"
+        "/force_backup — создать резервную копию прямо сейчас\n"
+        "/restore <file_id> — восстановить базу из файла в канале\n"
         "В группе бот отвечает на сообщения, содержащие слово 'Кай' (в любом месте текста), анализируя контекст последних сообщений.\n\n"
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
     if role == "admin":
-        text += "\n\nАдмин-команды:\n/setrole <user_id> <role>\n/ban <user_id>\n/unban <user_id>\n/users\n/stats\n/history\n/backup\n/schedule_backup — настроить автоматическое ежедневное резервное копирование\n/force_backup — создать резервную копию прямо сейчас\n/restore <file_id> — восстановить базу данных из указанного файла в канале"
-        await update.message.reply_text(text)
+        text += "\n\nАдмин-команды:\n/setrole <user_id> <role>\n/ban <user_id>\n/unban <user_id>\n/users\n/stats\n/history\n/backup\n/schedule_backup\n/force_backup\n/restore"
+    await update.message.reply_text(text)
 
 async def auth_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
@@ -1618,18 +1609,14 @@ async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"🕒 {row['timestamp']}\n\n"
     await update.message.reply_text(text[:4000])
 
+# ==================== РЕЗЕРВНОЕ КОПИРОВАНИЕ (рабочая версия без pg_dump) ====================
 @require_role(["admin"])
 async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создаёт резервную копию базы данных и отправляет админу."""
+    """Создаёт резервную копию базы данных и отправляет в канал (использует SELECT)."""
     await update.message.reply_text("🔄 Создаю резервную копию базы данных...")
     try:
         async with db_pool.acquire() as conn:
-            # Получаем список всех таблиц в схеме public
-            tables = await conn.fetch("""
-                SELECT tablename FROM pg_tables 
-                WHERE schemaname = 'public' 
-                ORDER BY tablename
-            """)
+            tables = await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
             if not tables:
                 await update.message.reply_text("❌ Нет таблиц для бэкапа.")
                 return
@@ -1656,17 +1643,135 @@ async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     backup_lines.append(f"-- Таблица {table_name} пуста")
             dump_text = "\n".join(backup_lines)
-            if len(dump_text) > 40 * 1024 * 1024:  # 40 МБ
-                await update.message.reply_text("❌ Дамп слишком большой для отправки через Telegram. Используйте ручной бэкап через Supabase.")
+            if len(dump_text) > 40 * 1024 * 1024:
+                await update.message.reply_text("❌ Дамп слишком большой для отправки через Telegram.")
                 return
-            from io import BytesIO
             file_obj = BytesIO(dump_text.encode("utf-8"))
             file_obj.name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql"
-            await update.message.reply_document(document=file_obj, filename=file_obj.name)
-            await update.message.reply_text("✅ Резервная копия создана и отправлена.")
+            # Отправляем в канал, если задан STORAGE_CHANNEL_ID, иначе просто админу
+            if STORAGE_CHANNEL_ID:
+                await bot_app.bot.send_document(chat_id=STORAGE_CHANNEL_ID, document=file_obj, filename=file_obj.name)
+                await update.message.reply_text("✅ Резервная копия сохранена в канале.")
+            else:
+                await update.message.reply_document(document=file_obj, filename=file_obj.name)
+                await update.message.reply_text("✅ Резервная копия отправлена.")
     except Exception as e:
         logging.error(f"Backup error: {e}")
-        await update.message.reply_text(f"❌ Ошибка создания резервной копии: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+# ==================== АВТОМАТИЧЕСКИЕ БЭКАПЫ (без pg_dump) ====================
+async def auto_backup_job():
+    """Фоновая задача: каждый день в заданное время вызывает backup (от имени бота, без отправки пользователю)."""
+    while True:
+        try:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT backup_time, channel_id FROM backup_settings LIMIT 1")
+                if not row:
+                    # Нет настроек – ждём час и пробуем снова
+                    await asyncio.sleep(3600)
+                    continue
+                backup_time = row["backup_time"]
+                channel_id = row["channel_id"]
+                now = datetime.now()
+                scheduled = datetime.combine(now.date(), backup_time)
+                if now > scheduled:
+                    scheduled += timedelta(days=1)
+                wait_seconds = (scheduled - now).total_seconds()
+                await asyncio.sleep(wait_seconds)
+                # Создаём дамп (без отправки пользователю)
+                async with db_pool.acquire() as conn:
+                    tables = await conn.fetch("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
+                    if not tables:
+                        continue
+                    backup_lines = []
+                    for table in tables:
+                        table_name = table["tablename"]
+                        rows = await conn.fetch(f"SELECT * FROM {table_name}")
+                        if rows:
+                            for row in rows:
+                                columns = list(row.keys())
+                                values = []
+                                for col in columns:
+                                    val = row[col]
+                                    if val is None:
+                                        values.append("NULL")
+                                    elif isinstance(val, (int, float)):
+                                        values.append(str(val))
+                                    else:
+                                        escaped = str(val).replace("'", "''")
+                                        values.append(f"'{escaped}'")
+                                columns_str = ", ".join(columns)
+                                values_str = ", ".join(values)
+                                backup_lines.append(f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});")
+                        else:
+                            backup_lines.append(f"-- Таблица {table_name} пуста")
+                    dump_text = "\n".join(backup_lines)
+                    if len(dump_text) > 40 * 1024 * 1024:
+                        logging.warning("Автоматический бэкап слишком большой, пропускаем.")
+                        continue
+                    file_obj = BytesIO(dump_text.encode("utf-8"))
+                    file_obj.name = f"auto_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql"
+                    await bot_app.bot.send_document(chat_id=channel_id, document=file_obj, filename=file_obj.name)
+                    logging.info("Автоматический бэкап создан и отправлен в канал.")
+                # Обновляем время последнего бэкапа
+                async with db_pool.acquire() as conn:
+                    await conn.execute("UPDATE backup_settings SET last_backup = NOW()")
+        except Exception as e:
+            logging.error(f"Ошибка в auto_backup_job: {e}")
+            await asyncio.sleep(3600)
+
+@require_role(["admin"])
+async def schedule_backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Установить время автоматического бэкапа (HH:MM)."""
+    if not context.args:
+        await update.message.reply_text("Использование: /schedule_backup <HH:MM>\nПример: /schedule_backup 03:00")
+        return
+    try:
+        backup_time = datetime.strptime(context.args[0], "%H:%M").time()
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO backup_settings (backup_time, channel_id) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET backup_time = $1",
+                               backup_time, STORAGE_CHANNEL_ID)
+        await update.message.reply_text(f"✅ Автоматические бэкапы настроены на {backup_time.strftime('%H:%M')} ежедневно.")
+    except:
+        await update.message.reply_text("Ошибка: укажите время в формате HH:MM, например 02:00")
+
+@require_role(["admin"])
+async def force_backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Создать резервную копию прямо сейчас (без ожидания расписания)."""
+    await backup(update, context)  # переиспользуем существующую команду
+
+@require_role(["admin"])
+async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Восстановить базу данных из файла в канале (file_id)."""
+    if not context.args:
+        await update.message.reply_text("Использование: /restore <file_id>\n(укажите file_id файла .sql в канале)")
+        return
+    file_id = context.args[0]
+    await update.message.reply_text("🔄 Восстанавливаю базу данных...")
+    try:
+        # Скачиваем файл из канала
+        file = await bot_app.bot.get_file(file_id)
+        with tempfile.NamedTemporaryFile(suffix=".sql", delete=False) as tmp:
+            await file.download_to_drive(tmp.name)
+            tmp_path = tmp.name
+        with open(tmp_path, "r", encoding="utf-8") as f:
+            sql = f.read()
+        # Выполняем SQL-команды (каждая команда отдельно)
+        async with db_pool.acquire() as conn:
+            # Разбиваем на отдельные запросы (примерно)
+            for statement in sql.split(";"):
+                stmt = statement.strip()
+                if stmt and not stmt.startswith("--"):
+                    try:
+                        await conn.execute(stmt)
+                    except Exception as e:
+                        logging.error(f"Ошибка выполнения: {stmt[:100]}... {e}")
+                        # не прерываем восстановление
+        await update.message.reply_text("✅ База данных успешно восстановлена.")
+        os.unlink(tmp_path)
+    except Exception as e:
+        logging.error(f"Restore error: {e}")
+        await update.message.reply_text(f"❌ Ошибка восстановления: {e}")
 
 # ==================== СТИЛИ (кнопки) ====================
 async def style_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1695,16 +1800,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     username = update.effective_user.username or "NoUsername"
 
-    # ЛИЧНАЯ ПЕРЕПИСКА
     if chat_type == "private":
         logging.info(f"PRIVATE: user={user_id}, text='{user_message}', doc={bool(update.message.document)}, photo={bool(update.message.photo)}, video={bool(update.message.video)}")
-        # Если есть файл – обрабатываем загрузку
         if update.message.document or update.message.photo or update.message.video:
             await handle_file_upload(update, context)
             return
         if not user_message:
             return
-        # Обычный текст – отвечаем через GigaChat
         style_key = await get_user_style(user_id)
         style_prompt = STYLES[style_key]["prompt"]
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -1724,22 +1826,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Ошибка при обращении к GigaChat. Попробуйте позже.")
         return
 
-    # ГРУППОВАЯ ЛОГИКА
     if chat_type in ["group", "supergroup"]:
         group_id = update.effective_chat.id
         await save_group_message(group_id, user_id, username, user_message or "(медиа)")
-
         settings = await get_group_settings(group_id)
         if settings["count_messages"]:
             await increment_message_count(group_id, user_id)
-
         if user_message:
             triggers = await get_triggers(group_id)
             for t in triggers:
                 if t["keyword"] in user_message.lower():
                     await update.message.reply_text(t["response"])
                     return
-
             if "кай" in user_message.lower():
                 history = await get_group_history(group_id, limit=10)
                 context_text = "\n".join([f"{h['username'] or h['user_id']}: {h['message']}" for h in history]) if history else "История пуста."
@@ -1757,7 +1855,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logging.error(f"Ошибка GigaChat при ответе на 'Кай': {e}")
                 return
-
             bot_username = (await context.bot.get_me()).username
             mention = f"@{bot_username}"
             reply_to_bot = update.message.reply_to_message and update.message.reply_to_message.from_user.id == context.bot.id
@@ -1794,243 +1891,6 @@ async def cleanup_group_messages_job():
         except Exception as e:
             logging.error(f"Ошибка автоочистки: {e}")
 
-# ==================== РЕЗЕРВНОЕ КОПИРОВАНИЕ (без pg_dump) ====================
-async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    role = await get_user_role(user_id)
-    if role != "admin":
-        await update.message.reply_text("⛔ Только администратор может создавать резервные копии.")
-        return
-    await update.message.reply_text("🔄 Создаю резервную копию базы данных (текстовый дамп)...")
-    try:
-        async with db_pool.acquire() as conn:
-            # Получаем список всех таблиц (исключая служебные)
-            tables = await conn.fetch("""
-                SELECT tablename FROM pg_tables 
-                WHERE schemaname = 'public' 
-                ORDER BY tablename
-            """)
-            if not tables:
-                await update.message.reply_text("❌ Нет таблиц для бэкапа.")
-                return
-            backup_lines = []
-            for table in tables:
-                table_name = table["tablename"]
-                # Получаем все строки из таблицы
-                rows = await conn.fetch(f"SELECT * FROM {table_name}")
-                if rows:
-                    # Формируем INSERT-запросы
-                    for row in rows:
-                        columns = list(row.keys())
-                        values = []
-                        for col in columns:
-                            val = row[col]
-                            if val is None:
-                                values.append("NULL")
-                            elif isinstance(val, (int, float)):
-                                values.append(str(val))
-                            else:
-                                # Экранируем строки и даты
-                                escaped = str(val).replace("'", "''")
-                                values.append(f"'{escaped}'")
-                        columns_str = ", ".join(columns)
-                        values_str = ", ".join(values)
-                        backup_lines.append(f"INSERT INTO {table_name} ({columns_str}) VALUES ({values_str});")
-                else:
-                    backup_lines.append(f"-- Таблица {table_name} пуста")
-            # Формируем текст дампа
-            dump_text = "\n".join(backup_lines)
-            # Если дамп слишком большой, обрезаем (Telegram лимит 50 МБ, но у нас вряд ли)
-            if len(dump_text) > 40 * 1024 * 1024:  # 40 МБ
-                await update.message.reply_text("❌ Дамп слишком большой для отправки через Telegram. Используйте ручной бэкап через Supabase.")
-                return
-            # Отправляем файл
-            from io import BytesIO
-            file_obj = BytesIO(dump_text.encode("utf-8"))
-            file_obj.name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql"
-            await update.message.reply_document(document=file_obj, filename=file_obj.name)
-            await update.message.reply_text("✅ Резервная копия создана и отправлена.")
-    except Exception as e:
-        logging.error(f"Backup error: {e}")
-        await update.message.reply_text(f"❌ Ошибка создания резервной копии: {e}")
-
-# ==================== АВТОМАТИЧЕСКИЕ БЭКАПЫ ====================
-import subprocess
-import tempfile
-import io
-import asyncio
-
-async def create_backup(chat_id: int = None, channel_id: int = None) -> str:
-    """Создаёт дамп базы данных и возвращает file_id загруженного файла в канале."""
-    if not channel_id:
-        # Получаем настройки из БД
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT channel_id FROM backup_settings LIMIT 1")
-            if not row:
-                raise ValueError("Канал для бэкапов не настроен.")
-            channel_id = row["channel_id"]
-    # Создаём временный файл
-    with tempfile.NamedTemporaryFile(suffix=".sql", delete=False) as tmp:
-        tmp_path = tmp.name
-    try:
-        # Используем команду pg_dump
-        db_url = DATABASE_URL
-        # Извлекаем параметры подключения
-        import urllib.parse
-        parsed = urllib.parse.urlparse(db_url)
-        dbname = parsed.path[1:]
-        user = parsed.username
-        password = parsed.password
-        host = parsed.hostname
-        port = parsed.port or 5432
-        cmd = [
-            "pg_dump",
-            f"--host={host}",
-            f"--port={port}",
-            f"--username={user}",
-            f"--dbname={dbname}",
-            "--format=plain",
-            "--no-owner",
-            "--no-privileges"
-        ]
-        env = os.environ.copy()
-        env["PGPASSWORD"] = password
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env
-        )
-        stdout, stderr = await process.communicate()
-        if process.returncode != 0:
-            raise Exception(stderr.decode())
-        with open(tmp_path, "wb") as f:
-            f.write(stdout)
-        # Отправляем файл в канал
-        with open(tmp_path, "rb") as f:
-            sent = await bot_app.bot.send_document(
-                chat_id=channel_id,
-                document=f,
-                filename=f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql",
-                caption="Резервная копия базы данных"
-            )
-            file_id = sent.document.file_id
-        # Сохраняем информацию о последнем бэкапе
-        async with db_pool.acquire() as conn:
-            await conn.execute("UPDATE backup_settings SET last_backup = NOW(), last_file_id = $1", file_id)
-        return file_id
-    except Exception as e:
-        logging.error(f"Ошибка создания бэкапа: {e}")
-        raise
-    finally:
-        os.unlink(tmp_path)
-
-async def schedule_backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Настраивает автоматическое ежедневное резервное копирование."""
-    user_id = update.effective_user.id
-    role = await get_user_role(user_id)
-    if role != "admin":
-        await update.message.reply_text("⛔ Только администратор может настраивать бэкапы.")
-        return
-    args = context.args
-    if len(args) == 0:
-        # Показываем текущие настройки
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT backup_time, last_backup, channel_id FROM backup_settings LIMIT 1")
-            if row:
-                await update.message.reply_text(
-                    f"📋 Текущие настройки бэкапов:\n"
-                    f"⏰ Время: {row['backup_time']}\n"
-                    f"🕒 Последний бэкап: {row['last_backup'].strftime('%Y-%m-%d %H:%M') if row['last_backup'] else 'никогда'}\n"
-                    f"📁 Канал: {row['channel_id']}"
-                )
-            else:
-                await update.message.reply_text("Автоматические бэкапы не настроены. Используйте /schedule_backup <HH:MM> для настройки.")
-        return
-    # Устанавливаем время
-    try:
-        backup_time = datetime.strptime(args[0], "%H:%M").time()
-        async with db_pool.acquire() as conn:
-            await conn.execute("INSERT INTO backup_settings (backup_time, channel_id) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET backup_time = $1",
-                               backup_time, STORAGE_CHANNEL_ID)
-        await update.message.reply_text(f"✅ Автоматические бэкапы настроены на {backup_time.strftime('%H:%M')} ежедневно.")
-        # Запускаем фоновую задачу, если её ещё нет
-        asyncio.create_task(backup_scheduler())
-    except:
-        await update.message.reply_text("Ошибка: укажите время в формате HH:MM, например 02:00")
-
-async def backup_scheduler():
-    """Фоновая задача для выполнения бэкапов по расписанию."""
-    while True:
-        try:
-            async with db_pool.acquire() as conn:
-                row = await conn.fetchrow("SELECT backup_time FROM backup_settings LIMIT 1")
-                if not row:
-                    await asyncio.sleep(3600)  # Проверяем раз в час
-                    continue
-                backup_time = row["backup_time"]
-                now = datetime.now()
-                scheduled = datetime.combine(now.date(), backup_time)
-                if now > scheduled:
-                    scheduled += timedelta(days=1)
-                wait_seconds = (scheduled - now).total_seconds()
-                await asyncio.sleep(wait_seconds)
-                # Создаём бэкап
-                await create_backup()
-                logging.info("Автоматический бэкап создан")
-        except Exception as e:
-            logging.error(f"Ошибка в планировщике бэкапов: {e}")
-            await asyncio.sleep(3600)
-
-async def force_backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Создаёт резервную копию прямо сейчас."""
-    user_id = update.effective_user.id
-    role = await get_user_role(user_id)
-    if role != "admin":
-        await update.message.reply_text("⛔ Только администратор может создавать бэкапы.")
-        return
-    await update.message.reply_text("🔄 Создаю резервную копию...")
-    try:
-        file_id = await create_backup()
-        await update.message.reply_text(f"✅ Резервная копия создана. File ID: `{file_id}`")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-
-async def restore_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Восстанавливает базу данных из указанного файла в канале."""
-    user_id = update.effective_user.id
-    role = await get_user_role(user_id)
-    if role != "admin":
-        await update.message.reply_text("⛔ Только администратор может восстанавливать базу.")
-        return
-    if not context.args:
-        await update.message.reply_text("Использование: /restore <file_id>")
-        return
-    file_id = context.args[0]
-    await update.message.reply_text("🔄 Восстанавливаю базу данных из указанного файла...")
-    try:
-        # Получаем файл из канала
-        file = await bot_app.bot.get_file(file_id)
-        # Скачиваем в временный файл
-        with tempfile.NamedTemporaryFile(suffix=".sql", delete=False) as tmp:
-            await file.download_to_drive(tmp.name)
-            tmp_path = tmp.name
-        # Читаем SQL-команды
-        with open(tmp_path, "r", encoding="utf-8") as f:
-            sql = f.read()
-        # Выполняем восстановление в новой базе данных
-        # Важно: сначала удаляем старую базу и создаём новую (если нужно)
-        # Здесь нужно подключиться к новой базе данных
-        # Для простоты предполагаем, что DATABASE_URL уже указывает на новую базу
-        async with db_pool.acquire() as conn:
-            # Выполняем SQL-команды из файла
-            await conn.execute(sql)
-        await update.message.reply_text("✅ База данных успешно восстановлена.")
-        os.unlink(tmp_path)
-    except Exception as e:
-        logging.error(f"Restore error: {e}")
-        await update.message.reply_text(f"❌ Ошибка восстановления: {e}")
-            
 # ==================== WEBHOOK И HTTP ====================
 async def handle_webhook(request):
     try:
@@ -2079,7 +1939,7 @@ async def main():
     bot_app.add_handler(CallbackQueryHandler(ttt_callback, pattern="^ttt_"))
     bot_app.add_handler(CommandHandler("meme", meme_command))
     bot_app.add_handler(CommandHandler("gpt", gpt_command))
-    bot_app.add_handler(CommandHandler("imagine", imagine_command))  # опционально
+    bot_app.add_handler(CommandHandler("imagine", imagine_command))
     bot_app.add_handler(CommandHandler("gif", gif_command))
     bot_app.add_handler(CommandHandler("weather", weather_command))
     bot_app.add_handler(CommandHandler("currency", currency_command))
@@ -2093,7 +1953,7 @@ async def main():
     bot_app.add_handler(CommandHandler("deltrigger", del_trigger_command))
     bot_app.add_handler(CommandHandler("groupstats", group_stats_command))
     bot_app.add_handler(CommandHandler("group_history", group_history_command))
-    # Админ-команды
+    # Админ-команды (включая бэкапы)
     bot_app.add_handler(CommandHandler("setrole", setrole))
     bot_app.add_handler(CommandHandler("ban", ban))
     bot_app.add_handler(CommandHandler("unban", unban))
@@ -2114,7 +1974,7 @@ async def main():
 
     asyncio.create_task(check_reminders())
     asyncio.create_task(cleanup_group_messages_job())
-    asyncio.create_task(backup_scheduler())
+    asyncio.create_task(auto_backup_job())
 
     app = web.Application()
     app.router.add_post('/webhook', handle_webhook)
