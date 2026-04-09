@@ -8,3 +8,6 @@ sqladmin
 sqlalchemy
 psycopg2-binary
 jinja2
+PyMuPDF
+python-docx
+aiofiles
