@@ -1068,6 +1068,83 @@ async def weather_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = await get_weather(city)
     await update.message.reply_text(result)
 
+# ==================== АНАЛИЗ ДОКУМЕНТОВ ====================
+import io
+import aiofiles
+import tempfile
+import os
+import PyMuPDF  # pip install PyMuPDF
+from docx import Document  # pip install python-docx
+
+async def extract_text_from_document(file_id: str, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Скачивает файл и извлекает текст в зависимости от типа."""
+    file = await context.bot.get_file(file_id)
+    # Скачиваем в временный файл
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp") as tmp:
+        await file.download_to_drive(tmp.name)
+        tmp_path = tmp.name
+    try:
+        # Определяем тип по расширению или MIME (упрощённо по имени)
+        ext = os.path.splitext(file.file_path or "")[1].lower()
+        text = ""
+        if ext == ".pdf":
+            doc = PyMuDF.open(tmp_path)
+            for page in doc:
+                text += page.get_text()
+            doc.close()
+        elif ext == ".docx":
+            doc = Document(tmp_path)
+            for para in doc.paragraphs:
+                text += para.text + "\n"
+        elif ext == ".txt":
+            with open(tmp_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        else:
+            return "❌ Неподдерживаемый формат. Отправьте PDF, DOCX или TXT."
+        if not text.strip():
+            return "❌ Не удалось извлечь текст (файл пуст или содержит только изображения)."
+        return text.strip()
+    except Exception as e:
+        logging.error(f"Extract text error: {e}")
+        return "❌ Ошибка при извлечении текста из документа."
+    finally:
+        os.unlink(tmp_path)
+
+async def analyze_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик для команды /analyze (ответ на сообщение с файлом)."""
+    # Проверяем, есть ли файл в ответе или в текущем сообщении
+    if update.message.reply_to_message and update.message.reply_to_message.document:
+        file = update.message.reply_to_message.document
+        file_id = file.file_id
+    elif update.message.document:
+        file = update.message.document
+        file_id = file.file_id
+    else:
+        await update.message.reply_text("Отправьте документ (PDF, DOCX, TXT) и ответьте на него командой /analyze, либо просто отправьте файл и следом команду.")
+        return
+    await update.message.reply_text("📄 Анализирую документ, подождите...")
+    text = await extract_text_from_document(file_id, context)
+    if text.startswith("❌"):
+        await update.message.reply_text(text)
+        return
+    # Обрезаем текст, если слишком длинный (GigaChat имеет лимит)
+    if len(text) > 8000:
+        text = text[:8000] + "\n...[текст обрезан]"
+    # Отправляем в GigaChat для суммаризации
+    try:
+        async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+            messages = [
+                {"role": "system", "content": "Ты — помощник для анализа документов. Сделай краткое изложение (суммаризацию) следующего текста. Выдели главные мысли. Отвечай на русском."},
+                {"role": "user", "content": text}
+            ]
+            payload = {"messages": messages}
+            response = await giga.achat(payload)
+            summary = response.choices[0].message.content
+            await update.message.reply_text(f"📑 Краткое содержание документа:\n\n{summary}")
+    except Exception as e:
+        logging.error(f"Analysis error: {e}")
+        await update.message.reply_text("❌ Ошибка при анализе документа через GigaChat.")
+
 # ===# ==================== КУРСЫ ВАЛЮТ (ЦБ РФ) ====================
 CBR_API_URL = "https://www.cbr-xml-daily.ru/daily_json.js"
 # Словарь популярных валют, недоступных в API ЦБ (например, криптовалюты)
@@ -1415,6 +1492,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/weather <город> — погода сейчас\n"
         "/currency <сумма> <из> <в> — конвертация валют\n"
         "/crypto <символ> — курс криптовалюты (BTC, ETH, SOL...)\n"
+        "/analyze — ответьте на сообщение с документом (PDF, DOCX, TXT), чтобы получить краткое содержание\n"
         "В группе бот отвечает на сообщения, содержащие слово 'Кай' (в любом месте текста), анализируя контекст последних сообщений.\n\n"
         "Доступные стили:\n" + "\n".join([f"• {v['name']}" for v in STYLES.values()])
     )
@@ -1744,6 +1822,7 @@ async def main():
     bot_app.add_handler(CommandHandler("weather", weather_command))
     bot_app.add_handler(CommandHandler("currency", currency_command))
     bot_app.add_handler(CommandHandler("crypto", crypto_command))
+    bot_app.add_handler(CommandHandler("analyze", analyze_document))
     # Групповые команды
     bot_app.add_handler(CommandHandler("setwelcome", set_welcome))
     bot_app.add_handler(CommandHandler("set_cleanup", set_cleanup))
