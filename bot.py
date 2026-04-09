@@ -1432,7 +1432,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/lang <ru|en|de|...> — язык перевода по умолчанию\n"
         "/explain <слово> — объяснить слово/фразу\n"
         "/news <запрос> — новости\n"
-        "/tgsearch <запрос> — поиск в Telegram\n"
+        "/tgsearch <запрос> — поиск в Telegram (временно не работает)\n"
         "/upload — загрузить файл в облако\n"
         "/files — список ваших файлов\n"
         "/get <id> — скачать файл\n"
