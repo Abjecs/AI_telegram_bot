@@ -1,5 +1,5 @@
 """
-Новая модульная точка входа бота.
+Модульная версия бота — готова к тестированию.
 """
 
 import asyncio
@@ -12,7 +12,6 @@ from telegram.ext import (
 from config import TELEGRAM_TOKEN, PORT
 from database.connection import init_db
 
-# Handlers
 from handlers.start import start, help_command
 from handlers.reminders import remind_command, myreminds_command, delremind_command
 from handlers.translate import translate_command, set_lang_command
@@ -22,8 +21,13 @@ from handlers.games import (
     casino_command, casino_callback,
     ttt_command, ttt_callback
 )
-from handlers.groups import set_welcome, group_stats_command, add_trigger_command
-from handlers.files import upload_command, files_command, get_command, delete_file_command
+from handlers.groups import (
+    set_welcome, add_trigger_command, list_triggers_command,
+    del_trigger_command, group_stats_command
+)
+from handlers.files import (
+    upload_command, files_command, get_command, delete_file_command, handle_file_upload
+)
 from handlers.admin import setrole, ban, stats
 from handlers.weather import weather_command
 from handlers.currency import currency_command
@@ -37,7 +41,7 @@ async def main():
     await init_db()
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Основные команды
+    # Основные
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("remind", remind_command))
@@ -62,8 +66,10 @@ async def main():
 
     # Группы
     app.add_handler(CommandHandler("setwelcome", set_welcome))
-    app.add_handler(CommandHandler("groupstats", group_stats_command))
     app.add_handler(CommandHandler("addtrigger", add_trigger_command))
+    app.add_handler(CommandHandler("triggers", list_triggers_command))
+    app.add_handler(CommandHandler("deltrigger", del_trigger_command))
+    app.add_handler(CommandHandler("groupstats", group_stats_command))
 
     # Файлы
     app.add_handler(CommandHandler("upload", upload_command))
@@ -82,19 +88,18 @@ async def main():
     app.add_handler(CallbackQueryHandler(casino_callback, pattern="^casino_"))
     app.add_handler(CallbackQueryHandler(ttt_callback, pattern="^ttt_"))
 
-    # Основной обработчик сообщений (GigaChat)
+    # Сообщения и файлы
+    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_file_upload))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     await app.initialize()
     await app.start()
 
-    # Webhook
     external_host = __import__("os").getenv("RENDER_EXTERNAL_HOSTNAME", "localhost")
     webhook_url = f"https://{external_host}/webhook"
     await app.bot.set_webhook(webhook_url)
     logging.info(f"Webhook: {webhook_url}")
 
-    # HTTP сервер
     web_app = web.Application()
     async def health(request):
         return web.Response(text="OK")
