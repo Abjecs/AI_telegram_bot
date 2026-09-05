@@ -1,12 +1,13 @@
 """
-Новая точка входа бота (модульная версия).
-Постепенно весь функционал переносится сюда.
+Новая модульная точка входа бота.
 """
 
 import asyncio
 import logging
 from aiohttp import web
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+)
 
 from config import TELEGRAM_TOKEN, PORT
 from database.connection import init_db
@@ -16,7 +17,11 @@ from handlers.start import start, help_command
 from handlers.reminders import remind_command, myreminds_command, delremind_command
 from handlers.translate import translate_command, set_lang_command
 from handlers.styles import style_command, style_callback
-from handlers.games import quiz_command, casino_command, ttt_command
+from handlers.games import (
+    quiz_command, quiz_callback, quiz_score_command,
+    casino_command, casino_callback,
+    ttt_command, ttt_callback
+)
 from handlers.groups import set_welcome, group_stats_command, add_trigger_command
 from handlers.files import upload_command, files_command, get_command, delete_file_command
 from handlers.admin import setrole, ban, stats
@@ -24,6 +29,7 @@ from handlers.weather import weather_command
 from handlers.currency import currency_command
 from handlers.crypto import crypto_command
 from handlers.news import news_command
+from handlers.message import handle_message
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -41,7 +47,10 @@ async def main():
     app.add_handler(CommandHandler("tr", translate_command))
     app.add_handler(CommandHandler("lang", set_lang_command))
     app.add_handler(CommandHandler("style", style_command))
+
+    # Игры
     app.add_handler(CommandHandler("quiz", quiz_command))
+    app.add_handler(CommandHandler("score", quiz_score_command))
     app.add_handler(CommandHandler("casino", casino_command))
     app.add_handler(CommandHandler("ttt", ttt_command))
 
@@ -69,6 +78,12 @@ async def main():
 
     # Callbacks
     app.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
+    app.add_handler(CallbackQueryHandler(quiz_callback, pattern="^quiz_"))
+    app.add_handler(CallbackQueryHandler(casino_callback, pattern="^casino_"))
+    app.add_handler(CallbackQueryHandler(ttt_callback, pattern="^ttt_"))
+
+    # Основной обработчик сообщений (GigaChat)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     await app.initialize()
     await app.start()
