@@ -1,13 +1,12 @@
 """
 Новая точка входа бота (модульная версия).
-Пока работает параллельно со старым bot.py.
-Постепенно весь функционал будет перенесён сюда.
+Постепенно весь функционал переносится сюда.
 """
 
 import asyncio
 import logging
 from aiohttp import web
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
 from config import TELEGRAM_TOKEN, PORT
 from database.connection import init_db
@@ -21,6 +20,10 @@ from handlers.games import quiz_command, casino_command, ttt_command
 from handlers.groups import set_welcome, group_stats_command, add_trigger_command
 from handlers.files import upload_command, files_command, get_command, delete_file_command
 from handlers.admin import setrole, ban, stats
+from handlers.weather import weather_command
+from handlers.currency import currency_command
+from handlers.crypto import crypto_command
+from handlers.news import news_command
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -41,6 +44,12 @@ async def main():
     app.add_handler(CommandHandler("quiz", quiz_command))
     app.add_handler(CommandHandler("casino", casino_command))
     app.add_handler(CommandHandler("ttt", ttt_command))
+
+    # Информация
+    app.add_handler(CommandHandler("weather", weather_command))
+    app.add_handler(CommandHandler("currency", currency_command))
+    app.add_handler(CommandHandler("crypto", crypto_command))
+    app.add_handler(CommandHandler("news", news_command))
 
     # Группы
     app.add_handler(CommandHandler("setwelcome", set_welcome))
@@ -64,7 +73,7 @@ async def main():
     await app.initialize()
     await app.start()
 
-    # Webhook (для Render и т.п.)
+    # Webhook
     external_host = __import__("os").getenv("RENDER_EXTERNAL_HOSTNAME", "localhost")
     webhook_url = f"https://{external_host}/webhook"
     await app.bot.set_webhook(webhook_url)
