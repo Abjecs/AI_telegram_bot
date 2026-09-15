@@ -12,4 +12,4 @@ def test_split_text_prefers_word_boundaries():
     text = "слово " * 1000
     chunks = split_text(text, limit=100)
     assert all(len(chunk) <= 100 for chunk in chunks)
-    assert "".join(chunk + (" " if index < len(chunks) - 1 else "") for index, chunk in enumerate(chunks)).replace("  ", " ").strip()
+    assert " ".join(chunks) == text.strip()
