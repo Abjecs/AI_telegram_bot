@@ -10,7 +10,7 @@ async def ask_gigachat(system_prompt: str, user_text: str) -> str | None:
         async with GigaChat(
             credentials=GIGACHAT_CREDENTIALS,
             verify_ssl_certs=False,
-            model="GigaChat"
+            model="GigaChat-2"
         ) as giga:
             messages = [
                 {"role": "system", "content": system_prompt},
