@@ -44,6 +44,7 @@ GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip()
 GIGACHAT_VERIFY_SSL_CERTS = os.getenv("GIGACHAT_VERIFY_SSL_CERTS", "true").lower() in {
     "1", "true", "yes", "on"
 }
+GIGACHAT_CA_BUNDLE_FILE = os.getenv("GIGACHAT_CA_BUNDLE_FILE", "").strip()
 AI_TIMEOUT = _float_env("AI_TIMEOUT", 60.0, 1.0)
 AI_MAX_RETRIES = _int_env("AI_MAX_RETRIES", 2, 0)
 AI_RETRY_BACKOFF = _float_env("AI_RETRY_BACKOFF", 1.0, 0.1)
