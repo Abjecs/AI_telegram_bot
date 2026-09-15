@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 TELEGRAM_TEXT_LIMIT = 4096
 
 
