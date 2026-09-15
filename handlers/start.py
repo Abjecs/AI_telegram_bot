@@ -1,6 +1,6 @@
 from telegram import Update
 from telegram.ext import ContextTypes
-from styles import STYLES
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -8,6 +8,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Используй /help чтобы увидеть все команды.\n"
         "Можешь просто написать мне сообщение — я отвечу."
     )
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -25,6 +26,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/remind <время> <текст> — напоминание\n"
         "/myreminds — список напоминаний\n"
         "/files — мои файлы\n"
+        "/setwelcome <текст> — приветствие группы (админ)\n"
+        "/addtrigger <слово> <ответ> — триггер группы (админ)\n"
+        "/triggers — список триггеров\n"
+        "/groupstats — статистика группы\n"
         "\nПросто напиши сообщение — я отвечу в выбранном стиле."
     )
     await update.message.reply_text(text)
