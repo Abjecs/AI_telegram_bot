@@ -32,11 +32,8 @@ jobs:
       - name: Compile Python files
         run: python -m compileall -q .
 
-      - name: Correctness lint
-        run: ruff check --select F821,F841 .
-
-      - name: Full lint (advisory)
-        run: ruff check --select F --extend-exclude '**/__init__.py' . || true
+      - name: Lint
+        run: ruff check --select F --extend-exclude '**/__init__.py' .
 
       - name: Tests
         env:
