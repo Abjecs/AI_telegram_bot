@@ -1,6 +1,13 @@
 from services.gigachat import _build_messages, _extract_text
 
 
+def _message_text(message) -> str:
+    content = message.content
+    if isinstance(content, str):
+        return content
+    return "".join(part.text for part in content if getattr(part, "text", None))
+
+
 def test_build_messages_preserves_system_history_and_user_message():
     messages = _build_messages(
         "system prompt",
@@ -12,8 +19,8 @@ def test_build_messages_preserves_system_history_and_user_message():
     )
 
     assert [message.role for message in messages] == ["system", "user", "assistant", "user"]
-    assert messages[0].content == "system prompt"
-    assert messages[-1].content == "current question"
+    assert _message_text(messages[0]) == "system prompt"
+    assert _message_text(messages[-1]) == "current question"
 
 
 def test_extract_text_from_current_completion_response():
