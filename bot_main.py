@@ -1,10 +1,12 @@
 """
-Модульная версия бота — готова к тестированию.
+Модульная версия бота.
 """
 
 import asyncio
 import logging
+import os
 from aiohttp import web
+from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 )
@@ -39,71 +41,86 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 async def main():
     await init_db()
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # Основные
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("remind", remind_command))
-    app.add_handler(CommandHandler("myreminds", myreminds_command))
-    app.add_handler(CommandHandler("delremind", delremind_command))
-    app.add_handler(CommandHandler("translate", translate_command))
-    app.add_handler(CommandHandler("tr", translate_command))
-    app.add_handler(CommandHandler("lang", set_lang_command))
-    app.add_handler(CommandHandler("style", style_command))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("remind", remind_command))
+    application.add_handler(CommandHandler("myreminds", myreminds_command))
+    application.add_handler(CommandHandler("delremind", delremind_command))
+    application.add_handler(CommandHandler("translate", translate_command))
+    application.add_handler(CommandHandler("tr", translate_command))
+    application.add_handler(CommandHandler("lang", set_lang_command))
+    application.add_handler(CommandHandler("style", style_command))
 
     # Игры
-    app.add_handler(CommandHandler("quiz", quiz_command))
-    app.add_handler(CommandHandler("score", quiz_score_command))
-    app.add_handler(CommandHandler("casino", casino_command))
-    app.add_handler(CommandHandler("ttt", ttt_command))
+    application.add_handler(CommandHandler("quiz", quiz_command))
+    application.add_handler(CommandHandler("score", quiz_score_command))
+    application.add_handler(CommandHandler("casino", casino_command))
+    application.add_handler(CommandHandler("ttt", ttt_command))
 
     # Информация
-    app.add_handler(CommandHandler("weather", weather_command))
-    app.add_handler(CommandHandler("currency", currency_command))
-    app.add_handler(CommandHandler("crypto", crypto_command))
-    app.add_handler(CommandHandler("news", news_command))
+    application.add_handler(CommandHandler("weather", weather_command))
+    application.add_handler(CommandHandler("currency", currency_command))
+    application.add_handler(CommandHandler("crypto", crypto_command))
+    application.add_handler(CommandHandler("news", news_command))
 
     # Группы
-    app.add_handler(CommandHandler("setwelcome", set_welcome))
-    app.add_handler(CommandHandler("addtrigger", add_trigger_command))
-    app.add_handler(CommandHandler("triggers", list_triggers_command))
-    app.add_handler(CommandHandler("deltrigger", del_trigger_command))
-    app.add_handler(CommandHandler("groupstats", group_stats_command))
+    application.add_handler(CommandHandler("setwelcome", set_welcome))
+    application.add_handler(CommandHandler("addtrigger", add_trigger_command))
+    application.add_handler(CommandHandler("triggers", list_triggers_command))
+    application.add_handler(CommandHandler("deltrigger", del_trigger_command))
+    application.add_handler(CommandHandler("groupstats", group_stats_command))
 
     # Файлы
-    app.add_handler(CommandHandler("upload", upload_command))
-    app.add_handler(CommandHandler("files", files_command))
-    app.add_handler(CommandHandler("get", get_command))
-    app.add_handler(CommandHandler("delete", delete_file_command))
+    application.add_handler(CommandHandler("upload", upload_command))
+    application.add_handler(CommandHandler("files", files_command))
+    application.add_handler(CommandHandler("get", get_command))
+    application.add_handler(CommandHandler("delete", delete_file_command))
 
-    # Админ
-    app.add_handler(CommandHandler("setrole", setrole))
-    app.add_handler(CommandHandler("ban", ban))
-    app.add_handler(CommandHandler("stats", stats))
+    # Админ (заглушки)
+    application.add_handler(CommandHandler("setrole", setrole))
+    application.add_handler(CommandHandler("ban", ban))
+    application.add_handler(CommandHandler("stats", stats))
 
     # Callbacks
-    app.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
-    app.add_handler(CallbackQueryHandler(quiz_callback, pattern="^quiz_"))
-    app.add_handler(CallbackQueryHandler(casino_callback, pattern="^casino_"))
-    app.add_handler(CallbackQueryHandler(ttt_callback, pattern="^ttt_"))
+    application.add_handler(CallbackQueryHandler(style_callback, pattern="^style_"))
+    application.add_handler(CallbackQueryHandler(quiz_callback, pattern="^quiz_"))
+    application.add_handler(CallbackQueryHandler(casino_callback, pattern="^casino_"))
+    application.add_handler(CallbackQueryHandler(ttt_callback, pattern="^ttt_"))
 
     # Сообщения и файлы
-    app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_file_upload))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_file_upload))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    await app.initialize()
-    await app.start()
+    await application.initialize()
+    await application.start()
 
-    external_host = __import__("os").getenv("RENDER_EXTERNAL_HOSTNAME", "localhost")
+    # Webhook
+    external_host = os.getenv("RENDER_EXTERNAL_HOSTNAME", "localhost")
     webhook_url = f"https://{external_host}/webhook"
-    await app.bot.set_webhook(webhook_url)
+    await application.bot.set_webhook(url=webhook_url)
     logging.info(f"Webhook: {webhook_url}")
 
-    web_app = web.Application()
+    # HTTP сервер с обработкой webhook
+    async def telegram_webhook(request):
+        try:
+            data = await request.json()
+            update = Update.de_json(data, application.bot)
+            await application.process_update(update)
+            return web.Response(text="OK")
+        except Exception as e:
+            logging.error(f"Webhook error: {e}")
+            return web.Response(status=500, text=str(e))
+
     async def health(request):
         return web.Response(text="OK")
+
+    web_app = web.Application()
+    web_app.router.add_post("/webhook", telegram_webhook)
     web_app.router.add_get("/health", health)
+    web_app.router.add_get("/", health)
 
     runner = web.AppRunner(web_app)
     await runner.setup()
