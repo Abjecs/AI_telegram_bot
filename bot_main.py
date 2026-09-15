@@ -40,7 +40,8 @@ async def _error_handler(update: object, context) -> None:
 
 def _webhook_url() -> str | None:
     if WEBHOOK_URL:
-        return WEBHOOK_URL.rstrip("/") + "/webhook"
+        url = WEBHOOK_URL.rstrip("/")
+        return url if url.endswith("/webhook") else f"{url}/webhook"
     if RENDER_EXTERNAL_HOSTNAME:
         return f"https://{RENDER_EXTERNAL_HOSTNAME}/webhook"
     return None
