@@ -130,6 +130,25 @@ async def init_db() -> None:
         await conn.execute("ALTER TABLE user_styles ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'")
         await conn.execute("ALTER TABLE user_styles ADD COLUMN IF NOT EXISTS target_lang TEXT NOT NULL DEFAULT 'RU'")
 
+        await conn.execute(
+            """
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'reminders'
+                      AND column_name = 'remind_at'
+                      AND data_type = 'timestamp without time zone'
+                ) THEN
+                    ALTER TABLE reminders
+                    ALTER COLUMN remind_at TYPE TIMESTAMPTZ
+                    USING remind_at AT TIME ZONE 'UTC';
+                END IF;
+            END
+            $$;
+            """
+        )
+        await conn.execute("UPDATE user_styles SET role = 'user' WHERE role = 'test'")
         await conn.execute("UPDATE messages SET created_at = NOW() WHERE created_at IS NULL")
         await conn.execute("UPDATE reminders SET created_at = NOW() WHERE created_at IS NULL")
         await conn.execute("ALTER TABLE messages ALTER COLUMN created_at SET DEFAULT NOW()")
