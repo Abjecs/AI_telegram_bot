@@ -5,9 +5,13 @@ import os
 GIGACHAT_CREDENTIALS = os.getenv("GIGACHAT_CREDENTIALS")
 
 async def ask_gigachat(system_prompt: str, user_text: str) -> str | None:
-    """Единый хелпер для запросов к GigaChat. Уменьшает дублирование кода."""
+    """Единый хелпер для запросов к GigaChat."""
     try:
-        async with GigaChat(credentials=GIGACHAT_CREDENTIALS, verify_ssl_certs=False, model="GigaChat:latest") as giga:
+        async with GigaChat(
+            credentials=GIGACHAT_CREDENTIALS,
+            verify_ssl_certs=False,
+            model="GigaChat"
+        ) as giga:
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_text}
