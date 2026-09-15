@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 
 def _required(name: str) -> str:
@@ -44,7 +45,10 @@ GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip()
 GIGACHAT_VERIFY_SSL_CERTS = os.getenv("GIGACHAT_VERIFY_SSL_CERTS", "true").lower() in {
     "1", "true", "yes", "on"
 }
-GIGACHAT_CA_BUNDLE_FILE = os.getenv("GIGACHAT_CA_BUNDLE_FILE", "").strip()
+_DEFAULT_GIGACHAT_CA = Path(__file__).resolve().parent / "certs" / "russian_trusted_root_ca.crt"
+GIGACHAT_CA_BUNDLE_FILE = os.getenv("GIGACHAT_CA_BUNDLE_FILE", "").strip() or (
+    str(_DEFAULT_GIGACHAT_CA) if _DEFAULT_GIGACHAT_CA.is_file() else ""
+)
 AI_TIMEOUT = _float_env("AI_TIMEOUT", 60.0, 1.0)
 AI_MAX_RETRIES = _int_env("AI_MAX_RETRIES", 2, 0)
 AI_RETRY_BACKOFF = _float_env("AI_RETRY_BACKOFF", 1.0, 0.1)
