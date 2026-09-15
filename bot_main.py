@@ -12,22 +12,8 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 from config import LOG_LEVEL, PORT, RENDER_EXTERNAL_HOSTNAME, TELEGRAM_TOKEN, WEBHOOK_SECRET, WEBHOOK_URL
 from database.connection import check_db, close_db, init_db
 from handlers.files import delete_file_command, files_command, get_command, handle_file_upload, upload_command
-from handlers.games import (
-    casino_callback,
-    casino_command,
-    quiz_callback,
-    quiz_command,
-    quiz_score_command,
-    ttt_callback,
-    ttt_command,
-)
-from handlers.groups import (
-    add_trigger_command,
-    del_trigger_command,
-    group_stats_command,
-    list_triggers_command,
-    set_welcome,
-)
+from handlers.games import casino_callback, casino_command, quiz_callback, quiz_command, quiz_score_command, ttt_callback, ttt_command
+from handlers.groups import add_trigger_command, del_trigger_command, group_stats_command, list_triggers_command, set_welcome
 from handlers.message import handle_message
 from handlers.news import news_command
 from handlers.reminders import delremind_command, myreminds_command, remind_command
@@ -61,69 +47,41 @@ def _webhook_url() -> str | None:
 
 
 def _webhook_secret() -> str:
-    # Telegram accepts only A-Z/a-z/0-9/_/- in this header token.
     return WEBHOOK_SECRET or secrets.token_urlsafe(32).replace(".", "-")
 
 
 async def main() -> None:
     await init_db()
-    application = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .updater(None)
-        .build()
-    )
-
+    application = Application.builder().token(TELEGRAM_TOKEN).updater(None).build()
     application.add_error_handler(_error_handler)
 
-    # Core commands
     for command, callback in {
-        "start": start,
-        "help": help_command,
-        "remind": remind_command,
-        "myreminds": myreminds_command,
-        "delremind": delremind_command,
-        "translate": translate_command,
-        "tr": translate_command,
-        "lang": set_lang_command,
+        "start": start, "help": help_command, "remind": remind_command,
+        "myreminds": myreminds_command, "delremind": delremind_command,
+        "translate": translate_command, "tr": translate_command, "lang": set_lang_command,
         "style": style_command,
     }.items():
         application.add_handler(CommandHandler(command, callback))
 
-    # Games
     for command, callback in {
-        "quiz": quiz_command,
-        "score": quiz_score_command,
-        "casino": casino_command,
-        "ttt": ttt_command,
+        "quiz": quiz_command, "score": quiz_score_command, "casino": casino_command, "ttt": ttt_command,
     }.items():
         application.add_handler(CommandHandler(command, callback))
 
-    # Information
     for command, callback in {
-        "weather": weather_command,
-        "currency": currency_command,
-        "crypto": crypto_command,
-        "news": news_command,
+        "weather": weather_command, "currency": currency_command, "crypto": crypto_command, "news": news_command,
     }.items():
         application.add_handler(CommandHandler(command, callback))
 
-    # Groups
     for command, callback in {
-        "setwelcome": set_welcome,
-        "addtrigger": add_trigger_command,
-        "triggers": list_triggers_command,
-        "deltrigger": del_trigger_command,
+        "setwelcome": set_welcome, "addtrigger": add_trigger_command,
+        "triggers": list_triggers_command, "deltrigger": del_trigger_command,
         "groupstats": group_stats_command,
     }.items():
         application.add_handler(CommandHandler(command, callback))
 
-    # Files
     for command, callback in {
-        "upload": upload_command,
-        "files": files_command,
-        "get": get_command,
-        "delete": delete_file_command,
+        "upload": upload_command, "files": files_command, "get": get_command, "delete": delete_file_command,
     }.items():
         application.add_handler(CommandHandler(command, callback))
 
@@ -131,25 +89,19 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(quiz_callback, pattern=r"^quiz_"))
     application.add_handler(CallbackQueryHandler(casino_callback, pattern=r"^casino_"))
     application.add_handler(CallbackQueryHandler(ttt_callback, pattern=r"^ttt_"))
-
-    application.add_handler(
-        MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_file_upload)
-    )
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_file_upload))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     webhook_url = _webhook_url()
     webhook_secret = _webhook_secret()
     stop_event = asyncio.Event()
-    worker_task: asyncio.Task | None = None
-    runner: web.AppRunner | None = None
 
     async def telegram_webhook(request: web.Request) -> web.Response:
         provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if not hmac.compare_digest(provided, webhook_secret):
             return web.Response(status=403, text="Forbidden")
         try:
-            data = await request.json()
-            update = Update.de_json(data, application.bot)
+            update = Update.de_json(await request.json(), application.bot)
             if update is None:
                 return web.Response(status=400, text="Invalid update")
             await application.update_queue.put(update)
@@ -174,6 +126,9 @@ async def main() -> None:
     web_app.router.add_get("/healthz", health)
     web_app.router.add_get("/", root)
 
+    runner = web.AppRunner(web_app)
+    worker_task: asyncio.Task | None = None
+
     async with application:
         if webhook_url:
             await application.bot.set_webhook(
@@ -188,8 +143,6 @@ async def main() -> None:
 
         await application.start()
         worker_task = asyncio.create_task(reminder_worker(application.bot, stop_event))
-
-        runner = web.AppRunner(web_app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", PORT)
         await site.start()
@@ -201,10 +154,11 @@ async def main() -> None:
             stop_event.set()
             if worker_task:
                 worker_task.cancel()
-                with asyncio.exceptions.CancelledError:
+                try:
+                    await worker_task
+                except asyncio.CancelledError:
                     pass
-            if runner:
-                await runner.cleanup()
+            await runner.cleanup()
             await application.stop()
 
     await close_db()
