@@ -5,6 +5,7 @@ import logging
 from collections.abc import Iterable
 
 from gigachat import GigaChat
+from gigachat.models import ChatCompletionRequest, ChatMessage
 
 from config import (
     AI_HISTORY_MESSAGES,
@@ -33,16 +34,45 @@ def _clean(value: str, limit: int) -> str:
     return (value or "").strip()[:limit]
 
 
-def _build_messages(system_prompt: str, user_text: str, history: Iterable[dict] | None) -> list[dict]:
-    messages = [{"role": "system", "content": _clean(system_prompt, 6000)}]
+def _build_messages(
+    system_prompt: str,
+    user_text: str,
+    history: Iterable[dict] | None,
+) -> list[ChatMessage]:
+    messages = [ChatMessage(role="system", content=_clean(system_prompt, 6000))]
     if history:
         for item in list(history)[-AI_HISTORY_MESSAGES:]:
             role = item.get("role")
             content = item.get("content")
             if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
-                messages.append({"role": role, "content": _clean(content, 6000)})
-    messages.append({"role": "user", "content": _clean(user_text, AI_MAX_INPUT_CHARS)})
+                messages.append(ChatMessage(role=role, content=_clean(content, 6000)))
+    messages.append(ChatMessage(role="user", content=_clean(user_text, AI_MAX_INPUT_CHARS)))
     return messages
+
+
+def _extract_text(response: object) -> str | None:
+    """Extract text from the current GigaChat 0.2.x completion response."""
+    messages = getattr(response, "messages", None) or []
+    if messages:
+        message = messages[0]
+        parts = getattr(message, "content", None) or []
+        if isinstance(parts, str):
+            return parts
+        text_parts = []
+        for part in parts:
+            text = getattr(part, "text", None)
+            if isinstance(text, str) and text:
+                text_parts.append(text)
+        if text_parts:
+            return "".join(text_parts)
+
+    # Compatibility fallback for older response objects.
+    choices = getattr(response, "choices", None) or []
+    if choices:
+        content = getattr(getattr(choices[0], "message", None), "content", None)
+        if isinstance(content, str):
+            return content
+    return None
 
 
 async def ask_gigachat(
@@ -59,7 +89,11 @@ async def ask_gigachat(
         logger.warning("AI rate limit reached for user_id=%s", user_id)
         return None
 
-    messages = _build_messages(system_prompt, user_text, history)
+    request = ChatCompletionRequest(
+        model=GIGACHAT_MODEL,
+        messages=_build_messages(system_prompt, user_text, history),
+    )
+
     async with _semaphore:
         for attempt in range(AI_MAX_RETRIES + 1):
             try:
@@ -70,26 +104,28 @@ async def ask_gigachat(
                     verify_ssl_certs=GIGACHAT_VERIFY_SSL_CERTS,
                     model=GIGACHAT_MODEL,
                     timeout=AI_TIMEOUT,
+                    max_retries=0,
                 ) as giga:
                     response = await asyncio.wait_for(
-                        giga.achat({"messages": messages}),
+                        giga.achat.create(request),
                         timeout=AI_TIMEOUT + 5,
                     )
 
-                choices = getattr(response, "choices", None) or []
-                if not choices:
-                    logger.error("GigaChat returned no choices")
-                    return None
-                content = getattr(choices[0].message, "content", None)
-                if not isinstance(content, str):
-                    logger.error("GigaChat returned an invalid message payload")
+                content = _extract_text(response)
+                if not content:
+                    logger.error("GigaChat returned an empty completion")
                     return None
                 return _clean(content, AI_MAX_OUTPUT_CHARS)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 if attempt >= AI_MAX_RETRIES:
-                    logger.exception("GigaChat request failed after %s attempts", attempt + 1)
+                    logger.error(
+                        "GigaChat request failed after %s attempts: %s: %s",
+                        attempt + 1,
+                        type(exc).__name__,
+                        str(exc)[:500],
+                    )
                     return None
                 delay = AI_RETRY_BACKOFF * (2**attempt)
                 logger.warning(
