@@ -33,7 +33,7 @@ jobs:
         run: python -m compileall -q .
 
       - name: Lint
-        run: ruff check --select F . --extend-exclude '**/__init__.py'
+        run: ruff check --select F --extend-exclude '**/__init__.py' .
 
       - name: Tests
         env:
