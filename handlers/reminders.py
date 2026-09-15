@@ -6,7 +6,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import MAX_USER_FILES
 from database.connection import get_pool
 
 
