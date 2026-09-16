@@ -25,34 +25,30 @@ def _float(name: str, default: float, minimum: float = 0.0) -> float:
 
 
 TELEGRAM_TOKEN = _required("TELEGRAM_TOKEN")
-
 PORT = _int("PORT", 8080, 1)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
 
-# Bybit
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "").strip()
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "").strip()
 BYBIT_BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com").strip()
 BYBIT_RECV_WINDOW = _int("BYBIT_RECV_WINDOW", 5000, 1000)
 
-# Trading defaults: safe paper mode until the user explicitly enables live trading.
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT").upper()
 TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 DRY_RUN = os.getenv("DRY_RUN", "true").lower() in {"1", "true", "yes", "on"}
-CAPITAL_USDT = _float("CAPITAL_USDT", 0.0, 0.0)  # 0 = use Bybit wallet balance
+CAPITAL_USDT = _float("CAPITAL_USDT", 0.0, 0.0)
 RISK_PER_TRADE_PCT = _float("RISK_PER_TRADE_PCT", 0.5, 0.01)
 MAX_POSITION_NOTIONAL_PCT = _float("MAX_POSITION_NOTIONAL_PCT", 100.0, 1.0)
-MAX_DAILY_LOSS_USDT = _float("MAX_DAILY_LOSS_USDT", 0.0, 0.0)  # 0 = disabled
+MAX_DAILY_LOSS_USDT = _float("MAX_DAILY_LOSS_USDT", 0.0, 0.0)
 LEVERAGE = _int("LEVERAGE", 3, 1)
 POLL_SECONDS = _float("POLL_SECONDS", 20.0, 5.0)
 MIN_SIGNAL_SCORE = _int("MIN_SIGNAL_SCORE", 6, 1)
 ATR_STOP_MULTIPLIER = _float("ATR_STOP_MULTIPLIER", 1.5, 0.1)
 ATR_TP_MULTIPLIER = _float("ATR_TP_MULTIPLIER", 2.5, 0.1)
 
-# AI confirmation. Keep disabled until an OpenAI API key is supplied.
 AI_ENABLED = os.getenv("AI_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
@@ -60,5 +56,3 @@ AI_MODEL = os.getenv("AI_MODEL", "gpt-5.6-luna").strip()
 
 if TRADING_ENABLED and not DRY_RUN and (not BYBIT_API_KEY or not BYBIT_API_SECRET):
     raise RuntimeError("LIVE trading requires BYBIT_API_KEY and BYBIT_API_SECRET")
-if AI_ENABLED and not OPENAI_API_KEY:
-    raise RuntimeError("AI_ENABLED=true requires OPENAI_API_KEY")
