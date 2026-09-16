@@ -12,7 +12,12 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from config import LOG_LEVEL, PORT, RENDER_EXTERNAL_HOSTNAME, TELEGRAM_TOKEN, WEBHOOK_SECRET, WEBHOOK_URL
 from trading.engine import TradingEngine
 
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 engine = TradingEngine()
 
@@ -35,7 +40,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Bybit + technical analysis + AI confirmation.\n"
         "/status — состояние\n"
         "/trade — текущий торговый сигнал\n"
-        "/paper — включить безопасный paper-режим\n"
+        "/paper — информация о paper-режиме\n"
         "/help — команды\n\n"
         "Реальные сделки включаются только через Render environment variables."
     )
@@ -46,7 +51,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     position = data["position"]
     pos = "нет"
     if position:
-        pos = f"{position.get('side')} {position.get('size')} @ {position.get('avgPrice')}"
+        pos = f"{position.get('side')} {position.get('size', position.get('qty'))} @ {position.get('avgPrice', position.get('entry'))}"
     await update.effective_message.reply_text(
         f"📊 {data['symbol']}\n"
         f"Режим: {'PAPER' if data['dry_run'] else 'LIVE'}\n"
@@ -54,23 +59,31 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Капитал: {data['capital']} USDT\n"
         f"Позиция: {pos}\n"
         f"Сделок сегодня: {data['trades_today']}\n"
+        f"P&L paper: {data['realized_today']:.4f} USDT\n"
         f"Последний цикл: {data['last_cycle'] or '—'}\n"
         f"Ошибка: {data['last_error'] or 'нет'}"
     )
 
 
 async def trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    s = engine.last_signal
-    if not s:
+    signal = engine.last_signal
+    if not signal:
         await update.effective_message.reply_text("Нет подтверждённого торгового сигнала.")
         return
     await update.effective_message.reply_text(
-        f"🎯 {s.side}\nScore: {s.score}\nEntry: {s.entry:.2f}\nSL: {s.stop:.2f}\nTP: {s.take:.2f}\n{s.reason}"
+        f"🎯 {signal.side}\n"
+        f"Score: {signal.score}\n"
+        f"Entry: {signal.entry:.2f}\n"
+        f"SL: {signal.stop:.2f}\n"
+        f"TP: {signal.take:.2f}\n"
+        f"{signal.reason}"
     )
 
 
 async def paper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text("PAPER режим задаётся переменной DRY_RUN=true в Render. Я не переключаю LIVE-торговлю из Telegram.")
+    await update.effective_message.reply_text(
+        "PAPER режим задаётся DRY_RUN=true в Render. LIVE-торговля из Telegram намеренно не переключается."
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -115,7 +128,11 @@ async def main() -> None:
     async with application:
         await application.start()
         if webhook_url:
-            await application.bot.set_webhook(url=webhook_url, secret_token=webhook_secret, allowed_updates=["message"])
+            await application.bot.set_webhook(
+                url=webhook_url,
+                secret_token=webhook_secret,
+                allowed_updates=["message"],
+            )
         trading_task = asyncio.create_task(engine.run())
         await runner.setup()
         await web.TCPSite(runner, "0.0.0.0", PORT).start()
