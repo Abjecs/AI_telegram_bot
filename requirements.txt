@@ -1,4 +1,4 @@
 python-telegram-bot==22.8
-gigachat==0.2.3
 aiohttp>=3.9,<4
-asyncpg>=0.29,<1
+pandas>=2.2,<3
+numpy>=2.0,<3
