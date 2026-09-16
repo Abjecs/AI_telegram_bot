@@ -7,10 +7,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from config import (
-    CAPITAL_USDT, DRY_RUN, LEVERAGE, MAX_DAILY_LOSS_USDT, MAX_POSITION_NOTIONAL_PCT,
-    POLL_SECONDS, RISK_PER_TRADE_PCT, SYMBOL, TRADING_ENABLED,
-)
+from config import CAPITAL_USDT, DRY_RUN, LEVERAGE, MAX_DAILY_LOSS_USDT, MAX_POSITION_NOTIONAL_PCT, POLL_SECONDS, RISK_PER_TRADE_PCT, SYMBOL, TRADING_ENABLED
 from trading.ai import confirm_signal
 from trading.bybit import BybitClient, BybitError
 from trading.indicators import enrich
@@ -49,9 +46,7 @@ class TradingEngine:
         await self.client.close()
 
     def _round_qty(self, qty: float) -> float:
-        if self.qty_step <= 0:
-            return qty
-        return math.floor(qty / self.qty_step) * self.qty_step
+        return math.floor(qty / self.qty_step) * self.qty_step if self.qty_step > 0 else qty
 
     async def _equity(self) -> float:
         if CAPITAL_USDT > 0:
@@ -66,31 +61,30 @@ class TradingEngine:
             if MAX_DAILY_LOSS_USDT > 0 and self.realized_today <= -MAX_DAILY_LOSS_USDT:
                 return
             try:
-                existing = await self.client.position(SYMBOL)
-                if existing:
-                    return
-                k5, k15 = await asyncio.gather(
-                    self.client.klines(SYMBOL, "5", 250),
-                    self.client.klines(SYMBOL, "15", 250),
-                )
-                df5 = self._df(k5)
-                df15 = self._df(k15)
-                signal = evaluate(enrich(df5), enrich(df15))
+                if not DRY_RUN:
+                    existing = await self.client.position(SYMBOL)
+                    if existing:
+                        return
+                k5, k15 = await asyncio.gather(self.client.klines(SYMBOL, "5", 250), self.client.klines(SYMBOL, "15", 250))
+                df5, df15 = enrich(self._df(k5)), enrich(self._df(k15))
+                signal = evaluate(df5, df15)
                 self.last_signal = signal
                 if not signal:
                     return
                 ai_ok, ai_reason = await confirm_signal({
                     "symbol": SYMBOL, "side": signal.side, "score": signal.score,
                     "entry": signal.entry, "stop": signal.stop, "take": signal.take,
-                    "rsi_5m": float(df5.iloc[-1].get("rsi", 50)) if "rsi" in df5 else None,
+                    "rsi_5m": float(df5.iloc[-1].rsi), "atr_pct_5m": float(df5.iloc[-1].atr_pct),
                     "reason": signal.reason,
                 })
                 if not ai_ok:
                     logger.info("Signal rejected by AI: %s", ai_reason)
                     return
                 equity = await self._equity()
-                risk_usdt = equity * RISK_PER_TRADE_PCT / 100
+                if equity <= 0:
+                    return
                 stop_distance = abs(signal.entry - signal.stop)
+                risk_usdt = equity * RISK_PER_TRADE_PCT / 100
                 qty = self._round_qty(risk_usdt / stop_distance)
                 max_notional = equity * MAX_POSITION_NOTIONAL_PCT / 100 * LEVERAGE
                 qty = min(qty, self._round_qty(max_notional / signal.entry))
@@ -115,7 +109,7 @@ class TradingEngine:
     @staticmethod
     def _df(rows: list[list[str]]) -> pd.DataFrame:
         rows = list(reversed(rows))
-        return pd.DataFrame(rows, columns=["start","open","high","low","close","volume","turnover"]).astype({c: float for c in ["open","high","low","close","volume","turnover"]})
+        return pd.DataFrame(rows, columns=["start", "open", "high", "low", "close", "volume", "turnover"]).astype({c: float for c in ["open", "high", "low", "close", "volume", "turnover"]})
 
     @staticmethod
     def _fmt_qty(qty: float) -> str:
@@ -145,8 +139,6 @@ class TradingEngine:
         return {
             "symbol": SYMBOL, "dry_run": DRY_RUN, "trading_enabled": TRADING_ENABLED,
             "capital": CAPITAL_USDT if CAPITAL_USDT > 0 else balance,
-            "position": position, "trades_today": self.trades_today,
-            "realized_today": self.realized_today,
-            "last_cycle": self.last_cycle.isoformat() if self.last_cycle else None,
-            "last_error": self.last_error,
+            "position": position, "trades_today": self.trades_today, "realized_today": self.realized_today,
+            "last_cycle": self.last_cycle.isoformat() if self.last_cycle else None, "last_error": self.last_error,
         }
