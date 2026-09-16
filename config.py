@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 import os
-from pathlib import Path
 
 
 def _required(name: str) -> str:
@@ -9,65 +10,55 @@ def _required(name: str) -> str:
     return value
 
 
-def _int_env(name: str, default: int, minimum: int = 0) -> int:
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer") from exc
+def _int(name: str, default: int, minimum: int = 0) -> int:
+    value = int(os.getenv(name, str(default)))
     if value < minimum:
         raise RuntimeError(f"{name} must be >= {minimum}")
     return value
 
 
-def _float_env(name: str, default: float, minimum: float = 0.0) -> float:
-    try:
-        value = float(os.getenv(name, str(default)))
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be a number") from exc
+def _float(name: str, default: float, minimum: float = 0.0) -> float:
+    value = float(os.getenv(name, str(default)))
     if value < minimum:
         raise RuntimeError(f"{name} must be >= {minimum}")
     return value
 
 
 TELEGRAM_TOKEN = _required("TELEGRAM_TOKEN")
-GIGACHAT_CREDENTIALS = _required("GIGACHAT_CREDENTIALS")
-DATABASE_URL = _required("DATABASE_URL")
 
-PORT = _int_env("PORT", 8080, 1)
+PORT = _int("PORT", 8080, 1)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
 
-GIGACHAT_MODEL = os.getenv("GIGACHAT_MODEL", "GigaChat-2").strip()
-GIGACHAT_BASE_URL = os.getenv("GIGACHAT_BASE_URL", "https://api.giga.chat/v1").strip()
-GIGACHAT_SCOPE = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS").strip()
-GIGACHAT_VERIFY_SSL_CERTS = os.getenv("GIGACHAT_VERIFY_SSL_CERTS", "true").lower() in {
-    "1", "true", "yes", "on"
-}
-_DEFAULT_GIGACHAT_CA = Path(__file__).resolve().parent / "certs" / "russian_trusted_root_ca.crt"
-GIGACHAT_CA_BUNDLE_FILE = os.getenv("GIGACHAT_CA_BUNDLE_FILE", "").strip() or (
-    str(_DEFAULT_GIGACHAT_CA) if _DEFAULT_GIGACHAT_CA.is_file() else ""
-)
-AI_TIMEOUT = _float_env("AI_TIMEOUT", 60.0, 1.0)
-AI_MAX_RETRIES = _int_env("AI_MAX_RETRIES", 2, 0)
-AI_RETRY_BACKOFF = _float_env("AI_RETRY_BACKOFF", 1.0, 0.1)
-AI_MAX_INPUT_CHARS = _int_env("AI_MAX_INPUT_CHARS", 12000, 100)
-AI_MAX_OUTPUT_CHARS = _int_env("AI_MAX_OUTPUT_CHARS", 12000, 100)
-AI_HISTORY_MESSAGES = _int_env("AI_HISTORY_MESSAGES", 8, 0)
-AI_MAX_CONCURRENT = _int_env("AI_MAX_CONCURRENT", 3, 1)
-AI_RATE_LIMIT = _int_env("AI_RATE_LIMIT", 10, 1)
-AI_RATE_WINDOW_SECONDS = _int_env("AI_RATE_WINDOW_SECONDS", 60, 1)
+# Bybit
+BYBIT_API_KEY = os.getenv("BYBIT_API_KEY", "").strip()
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "").strip()
+BYBIT_BASE_URL = os.getenv("BYBIT_BASE_URL", "https://api.bybit.com").strip()
+BYBIT_RECV_WINDOW = _int("BYBIT_RECV_WINDOW", 5000, 1000)
 
-REMINDER_POLL_SECONDS = _float_env("REMINDER_POLL_SECONDS", 5.0, 1.0)
-MAX_USER_FILES = _int_env("MAX_USER_FILES", 50, 1)
-MAX_FILE_NAME_CHARS = _int_env("MAX_FILE_NAME_CHARS", 255, 32)
+# Trading defaults: safe paper mode until the user explicitly enables live trading.
+SYMBOL = os.getenv("SYMBOL", "BTCUSDT").upper()
+TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+DRY_RUN = os.getenv("DRY_RUN", "true").lower() in {"1", "true", "yes", "on"}
+CAPITAL_USDT = _float("CAPITAL_USDT", 0.0, 0.0)  # 0 = use Bybit wallet balance
+RISK_PER_TRADE_PCT = _float("RISK_PER_TRADE_PCT", 0.5, 0.01)
+MAX_POSITION_NOTIONAL_PCT = _float("MAX_POSITION_NOTIONAL_PCT", 100.0, 1.0)
+MAX_DAILY_LOSS_USDT = _float("MAX_DAILY_LOSS_USDT", 0.0, 0.0)  # 0 = disabled
+LEVERAGE = _int("LEVERAGE", 3, 1)
+POLL_SECONDS = _float("POLL_SECONDS", 20.0, 5.0)
+MIN_SIGNAL_SCORE = _int("MIN_SIGNAL_SCORE", 6, 1)
+ATR_STOP_MULTIPLIER = _float("ATR_STOP_MULTIPLIER", 1.5, 0.1)
+ATR_TP_MULTIPLIER = _float("ATR_TP_MULTIPLIER", 2.5, 0.1)
 
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "").strip()
-TGSTAT_TOKEN = os.getenv("TGSTAT_API_TOKEN", "").strip()
-STORAGE_CHANNEL_ID = os.getenv("STORAGE_CHANNEL_ID", "").strip()
-IMGFLIP_USERNAME = os.getenv("IMGFLIP_USERNAME", "").strip()
-IMGFLIP_PASSWORD = os.getenv("IMGFLIP_PASSWORD", "").strip()
+# AI confirmation. Keep disabled until an OpenAI API key is supplied.
+AI_ENABLED = os.getenv("AI_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
+AI_MODEL = os.getenv("AI_MODEL", "gpt-5.6-luna").strip()
 
-if WEBHOOK_SECRET and not 1 <= len(WEBHOOK_SECRET) <= 256:
-    raise RuntimeError("WEBHOOK_SECRET must contain 1-256 characters")
+if TRADING_ENABLED and not DRY_RUN and (not BYBIT_API_KEY or not BYBIT_API_SECRET):
+    raise RuntimeError("LIVE trading requires BYBIT_API_KEY and BYBIT_API_SECRET")
+if AI_ENABLED and not OPENAI_API_KEY:
+    raise RuntimeError("AI_ENABLED=true requires OPENAI_API_KEY")
