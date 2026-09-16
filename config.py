@@ -4,19 +4,22 @@ import os
 
 def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
-    if not value: raise RuntimeError(f"Required environment variable is missing: {name}")
+    if not value:
+        raise RuntimeError(f"Required environment variable is missing: {name}")
     return value
 
 
 def _int(name: str, default: int, minimum: int = 0) -> int:
     value = int(os.getenv(name, str(default)))
-    if value < minimum: raise RuntimeError(f"{name} must be >= {minimum}")
+    if value < minimum:
+        raise RuntimeError(f"{name} must be >= {minimum}")
     return value
 
 
 def _float(name: str, default: float, minimum: float = 0.0) -> float:
     value = float(os.getenv(name, str(default)))
-    if value < minimum: raise RuntimeError(f"{name} must be >= {minimum}")
+    if value < minimum:
+        raise RuntimeError(f"{name} must be >= {minimum}")
     return value
 
 
@@ -38,7 +41,8 @@ DRY_RUN = os.getenv("DRY_RUN", "true").lower() in {"1", "true", "yes", "on"}
 CAPITAL_USDT = _float("CAPITAL_USDT", 0.0)
 RISK_PER_TRADE_PCT = _float("RISK_PER_TRADE_PCT", 0.5, 0.01)
 MAX_POSITION_NOTIONAL_PCT = _float("MAX_POSITION_NOTIONAL_PCT", 100.0, 1.0)
-MAX_DAILY_LOSS_USDT = _float("MAX_DAILY_LOSS_USDT", 2.0)
+MAX_DAILY_LOSS_PCT = _float("MAX_DAILY_LOSS_PCT", 4.0)
+MAX_DAILY_LOSS_USDT = _float("MAX_DAILY_LOSS_USDT", 0.0)
 MAX_TRADES_PER_DAY = _int("MAX_TRADES_PER_DAY", 12, 1)
 COOLDOWN_MINUTES = _int("COOLDOWN_MINUTES", 20, 0)
 LEVERAGE = _int("LEVERAGE", 3, 1)
