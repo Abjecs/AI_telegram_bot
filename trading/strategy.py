@@ -20,6 +20,7 @@ class Signal:
 def evaluate(df5: pd.DataFrame, df15: pd.DataFrame) -> Signal | None:
     a = df5.iloc[-1]
     b = df15.iloc[-1]
+    prev = df5.iloc[-2]
     score_long = 0
     score_short = 0
     reasons: list[str] = []
@@ -35,10 +36,8 @@ def evaluate(df5: pd.DataFrame, df15: pd.DataFrame) -> Signal | None:
     if a.vol_ratio >= 1.1:
         score_long += 1 if a.close > a.ema20 else 0
         score_short += 1 if a.close < a.ema20 else 0
-    if a.close > a.high20.shift(1) if hasattr(a.high20, 'shift') else False:
-        score_long += 1
-    if a.close < a.low20.shift(1) if hasattr(a.low20, 'shift') else False:
-        score_short += 1
+    if a.close > prev.high20: score_long += 1
+    if a.close < prev.low20: score_short += 1
 
     score = max(score_long, score_short)
     if score < MIN_SIGNAL_SCORE or score_long == score_short:
