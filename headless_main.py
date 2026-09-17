@@ -6,15 +6,18 @@ import os
 # This runtime is used by the Frankfurt Render service. It can run the trading
 # engine by itself for connectivity validation, or the full Telegram + trading
 # runtime when TELEGRAM_ENABLED=true.
-os.environ.setdefault("TELEGRAM_TOKEN", "headless-validation")
+
+def telegram_enabled() -> bool:
+    return os.getenv("TELEGRAM_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
+
+
+if not telegram_enabled():
+    # The config module requires TELEGRAM_TOKEN even for headless validation.
+    os.environ.setdefault("TELEGRAM_TOKEN", "headless-validation")
 
 from aiohttp import web
 from trading.engine import TradingEngine
 from config import PORT
-
-
-def telegram_enabled() -> bool:
-    return os.getenv("TELEGRAM_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
 
 
 async def run_headless() -> None:
@@ -50,8 +53,8 @@ async def run_headless() -> None:
 
 async def main() -> None:
     if telegram_enabled():
-        # Import only when enabled so the Frankfurt service can still be used
-        # for Bybit connectivity checks without requiring a real Telegram token.
+        # Import only when enabled so the service can still be used for Bybit
+        # connectivity checks without requiring a Telegram secret.
         from bot_main import main as telegram_main
 
         await telegram_main()
