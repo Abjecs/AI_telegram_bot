@@ -23,7 +23,11 @@ def _float(name: str, default: float, minimum: float = 0.0) -> float:
     return value
 
 
-TELEGRAM_TOKEN = _required("TELEGRAM_TOKEN")
+TELEGRAM_ENABLED = os.getenv("TELEGRAM_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+if TELEGRAM_ENABLED and not TELEGRAM_TOKEN:
+    raise RuntimeError("Required environment variable is missing: TELEGRAM_TOKEN")
+
 PORT = _int("PORT", 8080, 1)
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "").strip()
