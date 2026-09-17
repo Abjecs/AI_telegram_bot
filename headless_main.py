@@ -39,7 +39,7 @@ async def headless_health() -> None:
 
 async def main() -> None:
     if telegram_enabled() and not TELEGRAM_TOKEN_MISSING:
-        from bot_main_v2 import main as telegram_main
+        from bot_main_v3 import main as telegram_main
         await telegram_main()
         return
     await headless_health()
