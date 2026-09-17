@@ -59,7 +59,10 @@ def enrich(df: pd.DataFrame) -> pd.DataFrame:
     out["bb_upper"] = out.bb_mid + 2 * std
     out["bb_lower"] = out.bb_mid - 2 * std
     typical = (out.high + out.low + out.close) / 3
-    day = pd.to_datetime(out.start, unit="ms", utc=True).dt.floor("D")
+    # Bybit timestamps are numeric millisecond epochs. Cast explicitly before
+    # pd.to_datetime so pandas does not interpret string timestamps as dates.
+    start_ms = pd.to_numeric(out.start, errors="coerce")
+    day = pd.to_datetime(start_ms, unit="ms", utc=True).dt.floor("D")
     pv = typical * out.volume
     out["vwap"] = pv.groupby(day).cumsum() / out.volume.groupby(day).cumsum().replace(0, np.nan)
     return out.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
