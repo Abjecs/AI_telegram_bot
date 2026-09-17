@@ -1,51 +1,74 @@
 from __future__ import annotations
 
 import json
-
 import aiohttp
 
 from config import AI_ENABLED, AI_FAIL_CLOSED, AI_MODEL, OPENAI_API_KEY, OPENAI_BASE_URL
 
 
-async def confirm_signal(context: dict) -> tuple[bool, str]:
-    if not AI_ENABLED:
-        return True, "AI disabled"
-    if not OPENAI_API_KEY:
-        return (False, "OpenAI key is missing") if AI_FAIL_CLOSED else (True, "AI key missing; technical filters only")
+SCHEMA = {
+    "type": "object",
+    "properties": {
+        "decision": {"type": "string", "enum": ["LONG", "SHORT", "NO_TRADE"]},
+        "entry": {"type": "number"},
+        "stop": {"type": "number"},
+        "take": {"type": "number"},
+        "risk_score": {"type": "integer", "minimum": 1, "maximum": 10},
+        "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+        "rationale": {"type": "string"},
+        "invalidation": {"type": "string"},
+    },
+    "required": ["decision", "entry", "stop", "take", "risk_score", "confidence", "rationale", "invalidation"],
+    "additionalProperties": False,
+}
 
-    system = (
-        "You are a conservative crypto day-trading risk filter. Use ONLY supplied data. "
-        "Return JSON only with decision LONG, SHORT, or NO_TRADE and a concise reason. "
-        "Reject conflicting trend, excessive volatility, weak volume, poor reward/risk, or ambiguous setups. "
-        "Never invent data. Never place or request an order."
+
+async def analyze_market(context: dict) -> dict | None:
+    if not AI_ENABLED:
+        return None
+    if not OPENAI_API_KEY:
+        if AI_FAIL_CLOSED:
+            raise RuntimeError("OpenAI key is missing")
+        return None
+
+    instructions = (
+        "You are the decision layer of a crypto day-trading bot. Analyze only the supplied market snapshot. "
+        "You may choose LONG, SHORT, or NO_TRADE. If a trade is justified, choose a realistic LIMIT entry that "
+        "has a reasonable chance to rest on the book rather than crossing it. Set stop and take yourself using market "
+        "structure, volatility, liquidity and the user's required reward/risk ratio. The hard constraints in the input "
+        "cannot be violated. Risk score is 1-10 where 10 is highest risk. Do not invent news or market data. "
+        "Do not place, request, or simulate an order. Return only the requested structured object."
     )
+    user = json.dumps(context, separators=(",", ":"), ensure_ascii=False)
     payload = {
         "model": AI_MODEL,
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": json.dumps(context, separators=(",", ":"), ensure_ascii=False)},
-        ],
+        "store": False,
+        "instructions": instructions,
+        "input": user,
+        "text": {"format": {"type": "json_schema", "name": "trade_proposal", "strict": True, "schema": SCHEMA}},
     }
-    try:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                OPENAI_BASE_URL.rstrip("/") + "/chat/completions",
-                json=payload,
-                headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-            ) as response:
-                data = await response.json(content_type=None)
-                if response.status >= 400:
-                    return False, f"AI HTTP {response.status}: {data.get('error', {}).get('message', 'request failed')}"
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(
+            OPENAI_BASE_URL.rstrip("/") + "/responses",
+            json=payload,
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        ) as response:
+            data = await response.json(content_type=None)
+            if response.status >= 400:
+                message = data.get("error", {}).get("message", "request failed") if isinstance(data, dict) else "request failed"
+                raise RuntimeError(f"AI HTTP {response.status}: {message}")
 
-        text = data["choices"][0]["message"]["content"]
-        parsed = json.loads(text)
-        decision = str(parsed.get("decision", "NO_TRADE")).upper()
-        expected = "LONG" if context["side"] == "Buy" else "SHORT"
-        if decision != expected:
-            return False, str(parsed.get("reason", "AI did not confirm the setup"))
-        return True, str(parsed.get("reason", "AI confirmed"))
-    except Exception as exc:
-        return False, f"AI unavailable: {exc}"
+    text = data.get("output_text", "")
+    if not text:
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") == "output_text":
+                    text = content.get("text", "")
+                    break
+    if not text:
+        raise RuntimeError("AI returned no structured output")
+    result = json.loads(text)
+    result["risk_score"] = int(result["risk_score"])
+    result["confidence"] = int(result["confidence"])
+    return result
