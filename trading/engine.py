@@ -31,6 +31,7 @@ class TradingEngine:
         self._lock = asyncio.Lock()
         self.qty_step = 0.001
         self.min_qty = 0.001
+        self.max_leverage = None
         self.day = date.today()
 
     async def start(self):
@@ -41,9 +42,16 @@ class TradingEngine:
             lot = instrument.get("lotSizeFilter", {})
             self.qty_step = float(lot.get("qtyStep", self.qty_step))
             self.min_qty = float(lot.get("minOrderQty", self.min_qty))
+            leverage_filter = instrument.get("leverageFilter", {})
+            if leverage_filter.get("maxLeverage") is not None:
+                self.max_leverage = float(leverage_filter["maxLeverage"])
+                if LEVERAGE > self.max_leverage:
+                    raise RuntimeError(
+                        f"Configured leverage {LEVERAGE}x exceeds Bybit maximum {self.max_leverage}x for {SYMBOL}"
+                    )
         except Exception as exc:
             logger.warning("Instrument load failed: %s", exc)
-        logger.info("Trading engine started symbol=%s dry_run=%s", SYMBOL, DRY_RUN)
+        logger.info("Trading engine started symbol=%s dry_run=%s leverage=%sx", SYMBOL, DRY_RUN, LEVERAGE)
 
     async def stop(self):
         self.running = False
@@ -84,7 +92,7 @@ class TradingEngine:
     def _microstructure_ok(self, ticker: dict, book: dict) -> bool:
         bid = float(ticker.get("bid1Price", 0))
         ask = float(ticker.get("ask1Price", 0))
-        if bid <= 0 or ask <= 0 or ask <= bid:
+        if bid <= 0 or ask <= bid:
             return False
         mid = (bid + ask) / 2
         spread = (ask - bid) / mid * 100
@@ -93,6 +101,17 @@ class TradingEngine:
         bids = sum(float(x[1]) for x in book.get("b", [])[:10])
         asks = sum(float(x[1]) for x in book.get("a", [])[:10])
         return bids + asks > 0
+
+    def _risk_levels(self, signal):
+        """Return entry, stop and take-profit with an exact 1:1.5 risk/reward geometry."""
+        entry = float(signal.entry)
+        stop = float(signal.stop)
+        stop_distance = abs(entry - stop)
+        if stop_distance <= 0:
+            return entry, stop, stop, 0.0
+        take_distance = stop_distance * 1.5
+        take = entry + take_distance if signal.side == "Buy" else entry - take_distance
+        return entry, stop, take, take_distance / stop_distance
 
     async def cycle(self):
         async with self._lock:
@@ -141,18 +160,16 @@ class TradingEngine:
                 if not signal:
                     return
 
+                entry, stop, take, rr = self._risk_levels(signal)
+                if rr < 1.5:
+                    return
+
                 bids = sum(float(x[1]) for x in book.get("b", [])[:10])
                 asks = sum(float(x[1]) for x in book.get("a", [])[:10])
                 imbalance = bids / (bids + asks) if bids + asks else 0.5
                 if signal.side == "Buy" and imbalance < 0.42:
                     return
                 if signal.side == "Sell" and imbalance > 0.58:
-                    return
-
-                stop_distance = abs(signal.entry - signal.stop)
-                reward = abs(signal.take - signal.entry)
-                rr = reward / max(stop_distance, 1e-9)
-                if rr < 1.2:
                     return
 
                 spread_pct = (
@@ -168,9 +185,9 @@ class TradingEngine:
                         "symbol": SYMBOL,
                         "side": signal.side,
                         "score": signal.score,
-                        "entry": signal.entry,
-                        "stop": signal.stop,
-                        "take": signal.take,
+                        "entry": entry,
+                        "stop": stop,
+                        "take": take,
                         "rsi_5m": float(latest.rsi),
                         "adx_5m": float(latest.adx),
                         "atr_pct_5m": atr_pct,
@@ -187,51 +204,67 @@ class TradingEngine:
                     logger.info("AI rejected/failed: %s", ai_reason)
                     return
 
-                risk = equity * RISK_PER_TRADE_PCT / 100.0
-                quantity = self._round_qty(risk / max(stop_distance, 1e-9))
+                # Risk is defined as a percentage of equity, independent of leverage.
+                # 3x leverage changes required margin, not the allowed loss on the account.
+                risk_amount = equity * RISK_PER_TRADE_PCT / 100.0
+                stop_distance = abs(entry - stop)
+                quantity = self._round_qty(risk_amount / max(stop_distance, 1e-9))
                 max_notional = equity * MAX_POSITION_NOTIONAL_PCT / 100.0 * LEVERAGE
-                quantity = min(quantity, self._round_qty(max_notional / max(signal.entry, 1e-9)))
+                quantity = min(quantity, self._round_qty(max_notional / max(entry, 1e-9)))
                 if quantity < self.min_qty:
                     logger.info("Calculated quantity %.8f below minimum %.8f", quantity, self.min_qty)
                     return
 
                 self.last_trade_at = datetime.now(timezone.utc)
                 self.trades_today += 1
+                expected_loss = stop_distance * quantity
+                expected_profit = (abs(take - entry)) * quantity
                 if DRY_RUN:
                     self.paper_position = {
                         "side": signal.side,
                         "qty": quantity,
-                        "entry": signal.entry,
-                        "stop": signal.stop,
-                        "take": signal.take,
+                        "entry": entry,
+                        "stop": stop,
+                        "take": take,
+                        "risk_usdt": expected_loss,
+                        "target_usdt": expected_profit,
+                        "leverage": LEVERAGE,
                         "opened_at": self.last_trade_at.isoformat(),
                     }
                     logger.info(
-                        "PAPER %s qty=%s entry=%.2f SL=%.2f TP=%.2f AI=%s funding=%s",
+                        "PAPER %s qty=%s entry=%.2f SL=%.2f TP=%.2f risk=%.4f target=%.4f RR=1:1.5 leverage=%sx AI=%s funding=%s",
                         signal.side,
                         quantity,
-                        signal.entry,
-                        signal.stop,
-                        signal.take,
+                        entry,
+                        stop,
+                        take,
+                        expected_loss,
+                        expected_profit,
+                        LEVERAGE,
                         ai_reason,
                         funding_rate,
                     )
                 else:
+                    if self.max_leverage is not None and LEVERAGE > self.max_leverage:
+                        raise RuntimeError(f"Leverage {LEVERAGE}x exceeds Bybit maximum {self.max_leverage}x")
                     await self.client.set_leverage(SYMBOL, LEVERAGE)
                     await self.client.create_market_order(
                         SYMBOL,
                         signal.side,
                         self._fmt_qty(quantity),
-                        self._fmt_price(signal.stop),
-                        self._fmt_price(signal.take),
+                        self._fmt_price(stop),
+                        self._fmt_price(take),
                     )
                     logger.info(
-                        "LIVE %s qty=%s entry=%.2f SL=%.2f TP=%.2f AI=%s",
+                        "LIVE %s qty=%s entry=%.2f SL=%.2f TP=%.2f risk=%.4f target=%.4f RR=1:1.5 leverage=%sx AI=%s",
                         signal.side,
                         quantity,
-                        signal.entry,
-                        signal.stop,
-                        signal.take,
+                        entry,
+                        stop,
+                        take,
+                        expected_loss,
+                        expected_profit,
+                        LEVERAGE,
                         ai_reason,
                     )
             except BybitError as exc:
@@ -265,8 +298,6 @@ class TradingEngine:
 
     @staticmethod
     def _closed(df: pd.DataFrame) -> pd.DataFrame:
-        # Bybit returns the newest candle first; the newest row can still be forming.
-        # Signals are evaluated only on completed candles to avoid repainting.
         return df.iloc[:-1].copy() if len(df) else df
 
     @staticmethod
