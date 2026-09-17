@@ -18,13 +18,16 @@ async def main() -> None:
     engine = TradingEngine()
     task = asyncio.create_task(engine.run())
 
-    async def health(request: web.Request) -> web.Response:
-        return web.json_response({
+    def health_payload() -> dict:
+        return {
             "status": "ok",
             "trading": engine.running,
-            "last_cycle": engine.last_cycle,
-            "last_error": engine.last_error,
-        })
+            "last_cycle": engine.last_cycle.isoformat() if engine.last_cycle else None,
+            "last_error": str(engine.last_error) if engine.last_error else None,
+        }
+
+    async def health(request: web.Request) -> web.Response:
+        return web.json_response(health_payload())
 
     app = web.Application()
     app.router.add_get("/", health)
