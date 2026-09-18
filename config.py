@@ -43,6 +43,8 @@ if "TRADING_MODE" not in os.environ and "DRY_RUN" in os.environ:
 DRY_RUN = TRADING_MODE == "PAPER"
 
 PAPER_CAPITAL_USDT = _float("PAPER_CAPITAL_USDT", 1000.0, 1.0)
+# Optional trading/risk capital for DEMO/LIVE. 0 means use actual exchange equity.
+TRADE_CAPITAL_USDT = _float("TRADE_CAPITAL_USDT", 0.0, 0.0)
 LEVERAGE = _int("LEVERAGE", 3, 1)
 MAX_DAILY_LOSS_PCT = _float("MAX_DAILY_LOSS_PCT", 4.0, 0.01)
 TARGET_RR = _float("TARGET_RR", 1.5, 0.5)
