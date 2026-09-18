@@ -162,7 +162,7 @@ class TradingEngine:
     def _candidate_hash(self, signal, latest, ticker, imbalance):
         raw = "|".join([
             SYMBOL, signal.side, str(signal.score),
-            f"{float(latest.close):.2f}", f"{float(latest.atr):.2f}",
+            f"{float(latest.close):.2f}", f"{float(latest["atr"]):.2f}",
             f"{float(ticker.get('lastPrice', 0)):.2f}", f"{imbalance:.3f}",
         ])
         return hashlib.sha256(raw.encode()).hexdigest()
@@ -175,7 +175,7 @@ class TradingEngine:
                 "ema50": float(r.ema50), "ema200": float(r.ema200),
                 "rsi": float(r.rsi), "macd": float(r.macd),
                 "macd_signal": float(r.macd_signal), "adx": float(r.adx),
-                "atr": float(r.atr), "atr_pct": float(r.atr_pct),
+                "atr": float(r["atr"]), "atr_pct": float(r["atr_pct"]),
                 "volume_ratio": float(r.vol_ratio), "vwap": float(r.vwap),
                 "breakout_high": float(r.high20), "breakout_low": float(r.low20),
                 "bb_upper": float(r.bb_upper), "bb_lower": float(r.bb_lower),
@@ -247,8 +247,8 @@ class TradingEngine:
 
                 latest = df5.iloc[-1]
                 self.last_price = float(latest.close)
-                self.last_atr = float(latest.atr)
-                if not MIN_ATR_PCT <= float(latest.atr_pct) <= MAX_ATR_PCT:
+                self.last_atr = float(latest["atr"])
+                if not MIN_ATR_PCT <= float(latest["atr_pct"]) <= MAX_ATR_PCT:
                     return None
 
                 ticker, book = await asyncio.gather(
