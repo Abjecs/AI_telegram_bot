@@ -380,8 +380,15 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             value = context.args[1].upper()
             if not value.endswith("USDT") or len(value) < 6: raise ValueError("Пара должна быть BTCUSDT")
             engine_module.SYMBOL = value
-        elif name == "capital":
-            engine.set_paper_capital(float(raw))
+        elif name in {"capital", "trade_capital"}:
+            value = float(raw)
+            if name == "capital":
+                engine.set_paper_capital(value)
+            else:
+                if value < 0: raise ValueError("Капитал: 0 или больше")
+                if engine.paper_position or engine.pending_order or engine.exchange_trade:
+                    raise ValueError("Сначала закрой активную позицию или заявку")
+                engine_module.TRADE_CAPITAL_USDT = value
         elif name == "price":
             if raw != "auto": raise ValueError("Цена только auto")
         elif name == "leverage":
