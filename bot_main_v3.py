@@ -34,7 +34,7 @@ async def notify_subscribers(text: str):
 
 engine.event_callback = notify_subscribers
 
-PERSISTED_SETTINGS = ("SYMBOL", "LEVERAGE", "MAX_DAILY_LOSS_PCT", "TARGET_RR",
+PERSISTED_SETTINGS = ("SYMBOL", "TRADE_CAPITAL_USDT", "LEVERAGE", "MAX_DAILY_LOSS_PCT", "TARGET_RR",
                       "MAX_TRADES_PER_DAY", "COOLDOWN_MINUTES", "POLL_SECONDS",
                       "MAX_AI_RISK_SCORE", "TRADING_ENABLED", "TRADING_MODE")
 
@@ -106,7 +106,8 @@ def proposal_buttons(pid: str) -> InlineKeyboardMarkup:
 def settings_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🪙 Пара", callback_data="edit:SYMBOL"),
-         InlineKeyboardButton("💰 Капитал", callback_data="edit:CAPITAL")],
+         InlineKeyboardButton("💰 Капитал", callback_data="edit:TRADE_CAPITAL")],
+        [InlineKeyboardButton("🔴 Закрыть позицию", callback_data="close_position")],
         [InlineKeyboardButton("⚡ Плечо", callback_data="edit:LEVERAGE"),
          InlineKeyboardButton("🛑 Дневной лимит", callback_data="edit:MAX_DAILY_LOSS_PCT")],
         [InlineKeyboardButton("🎯 Risk/Reward", callback_data="edit:TARGET_RR"),
@@ -131,6 +132,7 @@ def settings_text() -> str:
         f"AI-фильтр риска: ≤ {engine_module.MAX_AI_RISK_SCORE}/10\n"
         f"Торговля: {'ON' if engine_module.TRADING_ENABLED else 'OFF'}\n"
         f"Режим: {engine_module.TRADING_MODE}\n"
+        f"Капитал торговли: {engine_module.TRADE_CAPITAL_USDT:g} USDT (0 = баланс Bybit)\n"
         f"PAPER капитал: {engine.paper_capital:g} USDT\n\n"
         "Риск сделки: 1% капитала. Цель: 1.5% капитала при RR 1:1.5."
     )
@@ -144,7 +146,7 @@ def help_text() -> str:
         "🔴 LIVE — реальные средства; требуется отдельное подтверждение.\n\n"
         "Команды:\n"
         "/start /status /signal /settings\n"
-        "/set symbol BTCUSDT\n/set capital 1000\n/set leverage 3\n"
+        "/set symbol BTCUSDT\n/set capital 1000\n/set trade_capital 45\n/set leverage 3\n"
         "/set daily_loss_pct 4\n/set rr 1.5\n/set trades_day 6\n"
         "/set cooldown 20\n/set poll 20\n/set risk_filter 6\n"
         "/trading on|off\n/mode paper|demo|live\n\n"
@@ -299,6 +301,12 @@ async def text_setting_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if not value.endswith("USDT") or len(value) < 6:
                 raise ValueError("Пара должна быть вида BTCUSDT")
             engine_module.SYMBOL = value
+        elif name == "TRADE_CAPITAL":
+            value = float(raw)
+            if value < 0: raise ValueError("Капитал: 0 или больше")
+            if engine.paper_position or engine.pending_order or engine.exchange_trade:
+                raise ValueError("Сначала закрой активную позицию или заявку")
+            engine_module.TRADE_CAPITAL_USDT = value
         elif name == "CAPITAL":
             engine.set_paper_capital(float(raw))
         elif name == "LEVERAGE":
@@ -368,7 +376,7 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name, raw = context.args[0].lower(), context.args[1].lower()
     try:
         if name == "symbol":
-            if engine.paper_position or engine.pending_order: raise ValueError("Сначала закрой активную позицию или заявку")
+            if engine.paper_position or engine.pending_order or engine.exchange_trade: raise ValueError("Сначала закрой активную позицию или заявку")
             value = context.args[1].upper()
             if not value.endswith("USDT") or len(value) < 6: raise ValueError("Пара должна быть BTCUSDT")
             engine_module.SYMBOL = value
@@ -439,6 +447,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d=="status": await status(update,context); return
     if d=="settings": await settings(update,context); return
     if d=="position": await position(update,context); return
+    if d=="close_position":
+        ok, msg = await engine.close_position()
+        await q.edit_message_text(("✅ " if ok else "⚠️ ") + msg, reply_markup=menu())
+        return
     if d=="risk": await risk(update,context); return
     if d=="stats": await stats(update,context); return
     if d=="journal": await journal(update,context); return
@@ -446,6 +458,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = d.split(":",1)[1]
         labels = {
             "SYMBOL":"пару, например BTCUSDT",
+            "TRADE_CAPITAL":"капитал для расчёта сделок в DEMO/LIVE в USDT, например 45; 0 = баланс Bybit",
             "CAPITAL":"капитал PAPER в USDT, например 1000",
             "LEVERAGE":"плечо от 1 до 100",
             "MAX_DAILY_LOSS_PCT":"дневной лимит убытка в %, например 4",
