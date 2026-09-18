@@ -25,6 +25,15 @@ engine = TradingEngine()
 subscribers: set[int] = set()
 pending_setting_input: dict[int, str] = {}
 
+async def notify_subscribers(text: str):
+    for chat_id in list(subscribers):
+        try:
+            await application.bot.send_message(chat_id=chat_id, text=text)
+        except Exception as exc:
+            logger.warning("Notification delivery failed: %s", exc)
+
+engine.event_callback = notify_subscribers
+
 PERSISTED_SETTINGS = ("SYMBOL", "LEVERAGE", "MAX_DAILY_LOSS_PCT", "TARGET_RR",
                       "MAX_TRADES_PER_DAY", "COOLDOWN_MINUTES", "POLL_SECONDS",
                       "MAX_AI_RISK_SCORE", "TRADING_ENABLED", "TRADING_MODE")
@@ -137,7 +146,7 @@ def help_text() -> str:
         "/set daily_loss_pct 4\n/set rr 1.5\n/set trades_day 6\n"
         "/set cooldown 20\n/set poll 20\n/set risk_filter 6\n"
         "/trading on|off\n/mode paper|demo|live\n\n"
-        "AI выбирает направление, вход, SL и TP. Жёсткие ограничения бота не меняются AI."
+        "AI выбирает направление и структуру сделки. Бот принудительно пересчитывает TP по заданному RR и не позволяет AI нарушить жёсткие лимиты."
     )
 
 def proposal_text(p: dict) -> str:
@@ -225,7 +234,7 @@ async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def trade_stats():
     journal = engine.state.get("journal", [])
-    closes = [x for x in journal if x.get("event") == "PAPER_CLOSE"]
+    closes = [x for x in journal if x.get("event") in {"PAPER_CLOSE", "DEMO_CLOSE", "LIVE_CLOSE"}]
     wins = sum(1 for x in closes if x.get("result") == "TP")
     losses = sum(1 for x in closes if x.get("result") == "SL")
     pnl = sum(float(x.get("pnl", 0) or 0) for x in closes)
@@ -237,7 +246,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not private(update): return
     total, wins, losses, pnl, win_rate = trade_stats()
     await reply(update, (
-        "📈 СТАТИСТИКА PAPER\n\n"
+        f"📈 СТАТИСТИКА {engine_module.TRADING_MODE}\n\n"
         f"Закрытых сделок: {total}\n"
         f"TP: {wins} • SL: {losses}\n"
         f"Win rate: {win_rate:.1f}%\n"
@@ -248,7 +257,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def journal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not private(update): return
-    events = [x for x in engine.state.get("journal", []) if x.get("event") in {"PAPER_CLOSE", "PAPER_OPEN_CONFIRMED"}][-8:]
+    events = [x for x in engine.state.get("journal", []) if x.get("event") in {"PAPER_CLOSE", "PAPER_OPEN_CONFIRMED", "DEMO_CLOSE", "DEMO_ORDER_FILLED", "LIVE_CLOSE", "LIVE_ORDER_FILLED"}][-8:]
     if not events:
         await reply(update, "📜 ЖУРНАЛ\n\nПока записей нет.", menu())
         return
