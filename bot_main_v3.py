@@ -8,7 +8,7 @@ import time
 
 from aiohttp import web
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import config as config_module
 import trading.engine as engine_module
@@ -21,6 +21,7 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
 logger = logging.getLogger(__name__)
 engine = TradingEngine()
 subscribers: set[int] = set()
+pending_setting_input: dict[int, str] = {}
 
 PERSISTED_SETTINGS = ("SYMBOL", "LEVERAGE", "MAX_DAILY_LOSS_PCT", "TARGET_RR",
                       "MAX_TRADES_PER_DAY", "COOLDOWN_MINUTES", "POLL_SECONDS",
@@ -84,6 +85,20 @@ def proposal_buttons(pid: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm:{pid}"),
         InlineKeyboardButton("❌ Отклонить", callback_data=f"reject:{pid}")
     ]])
+
+def settings_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🪙 Пара", callback_data="edit:SYMBOL"),
+         InlineKeyboardButton("💰 Капитал", callback_data="edit:CAPITAL")],
+        [InlineKeyboardButton("⚡ Плечо", callback_data="edit:LEVERAGE"),
+         InlineKeyboardButton("🛑 Дневной лимит", callback_data="edit:MAX_DAILY_LOSS_PCT")],
+        [InlineKeyboardButton("🎯 Risk/Reward", callback_data="edit:TARGET_RR"),
+         InlineKeyboardButton("📈 Макс. сделок", callback_data="edit:MAX_TRADES_PER_DAY")],
+        [InlineKeyboardButton("⏱ Пауза", callback_data="edit:COOLDOWN_MINUTES"),
+         InlineKeyboardButton("🔄 Интервал", callback_data="edit:POLL_SECONDS")],
+        [InlineKeyboardButton("🤖 AI-фильтр", callback_data="edit:MAX_AI_RISK_SCORE")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="home")],
+    ])
 
 def settings_text() -> str:
     return (
@@ -161,7 +176,58 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not private(update): return
-    await reply(update, settings_text(), menu())
+    await reply(update, settings_text(), settings_menu())
+
+async def text_setting_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not private(update) or not update.effective_message:
+        return
+    chat_id = update.effective_chat.id
+    name = pending_setting_input.pop(chat_id, None)
+    if not name:
+        return
+    raw = (update.effective_message.text or "").strip()
+    try:
+        if name == "SYMBOL":
+            value = raw.upper()
+            if not value.endswith("USDT") or len(value) < 6:
+                raise ValueError("Пара должна быть вида BTCUSDT")
+            engine_module.SYMBOL = value
+        elif name == "CAPITAL":
+            engine.set_paper_capital(float(raw))
+        elif name == "LEVERAGE":
+            value = int(raw)
+            if not 1 <= value <= 100: raise ValueError("Плечо: 1-100")
+            engine_module.LEVERAGE = value
+        elif name == "MAX_DAILY_LOSS_PCT":
+            value = float(raw)
+            if not 0.1 <= value <= 100: raise ValueError("Лимит: 0.1-100%")
+            engine_module.MAX_DAILY_LOSS_PCT = value
+        elif name == "TARGET_RR":
+            value = float(raw)
+            if not 0.5 <= value <= 10: raise ValueError("RR: 0.5-10")
+            engine_module.TARGET_RR = value
+        elif name == "MAX_TRADES_PER_DAY":
+            value = int(raw)
+            if not 1 <= value <= 100: raise ValueError("Сделок/день: 1-100")
+            engine_module.MAX_TRADES_PER_DAY = value
+        elif name == "COOLDOWN_MINUTES":
+            value = int(raw)
+            if not 0 <= value <= 1440: raise ValueError("Пауза: 0-1440 мин")
+            engine_module.COOLDOWN_MINUTES = value
+        elif name == "POLL_SECONDS":
+            value = float(raw)
+            if not 5 <= value <= 300: raise ValueError("Интервал: 5-300 сек")
+            engine_module.POLL_SECONDS = value
+        elif name == "MAX_AI_RISK_SCORE":
+            value = int(raw)
+            if not 1 <= value <= 10: raise ValueError("AI-фильтр: 1-10")
+            engine_module.MAX_AI_RISK_SCORE = value
+        else:
+            raise ValueError("Неизвестная настройка")
+        persist_settings()
+        await update.effective_message.reply_text("✅ Настройка сохранена.", reply_markup=settings_menu())
+    except (ValueError, TypeError):
+        await update.effective_message.reply_text("❌ Некорректное значение. Попробуй ещё раз.", reply_markup=settings_menu())
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not private(update): return
@@ -264,6 +330,24 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d=="home": await start(update,context); return
     if d=="status": await status(update,context); return
     if d=="settings": await settings(update,context); return
+    if d.startswith("edit:"):
+        name = d.split(":",1)[1]
+        labels = {
+            "SYMBOL":"пару, например BTCUSDT",
+            "CAPITAL":"капитал PAPER в USDT, например 1000",
+            "LEVERAGE":"плечо от 1 до 100",
+            "MAX_DAILY_LOSS_PCT":"дневной лимит убытка в %, например 4",
+            "TARGET_RR":"Risk/Reward, например 1.5",
+            "MAX_TRADES_PER_DAY":"максимум сделок в день",
+            "COOLDOWN_MINUTES":"паузу между сделками в минутах",
+            "POLL_SECONDS":"интервал проверки рынка в секундах",
+            "MAX_AI_RISK_SCORE":"максимально допустимый AI-риск от 1 до 10",
+        }
+        if name not in labels:
+            return
+        pending_setting_input[update.effective_chat.id] = name
+        await q.edit_message_text(f"✏️ Введи {labels[name]}\n\nОтправь только значение.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="settings")]]))
+        return
     if d=="help": await help_command(update,context); return
     if d=="signal": await signal(update,context); return
     if d=="mode":
@@ -324,6 +408,7 @@ async def main():
     for cmd,handler in [("start",start),("help",help_command),("status",status),("signal",signal),("settings",settings),("set",set_command),("trading",trading_command),("mode",mode_command)]:
         application.add_handler(CommandHandler(cmd,handler))
     application.add_handler(CallbackQueryHandler(callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_setting_input))
     await application.initialize(); await application.start()
     url=webhook_url()
     if url:
