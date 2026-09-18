@@ -274,8 +274,6 @@ async def engine_loop():
     await engine.start()
     while True:
         try:
-            if engine_module.TRADING_MODE=="PAPER" and engine.last_price>0:
-                await engine.paper_monitor(engine.last_price)
             proposal=await engine.cycle()
             if proposal:
                 for chat_id in list(subscribers):
