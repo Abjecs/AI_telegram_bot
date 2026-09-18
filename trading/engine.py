@@ -344,6 +344,20 @@ class TradingEngine:
                 self.pending_proposal = None
                 return False, "Предложение истекло. Нужен новый анализ рынка."
 
+            # Final hard safety gate. AI cannot bypass these limits.
+            if not TRADING_ENABLED:
+                return False, "Новые входы сейчас выключены."
+            if self.trades_today >= MAX_TRADES_PER_DAY:
+                return False, "Достигнут лимит сделок на сегодня."
+            if self._daily_limit() and self.realized_today <= -self._daily_limit():
+                return False, "Достигнут дневной лимит убытка."
+            if self._cooldown_active():
+                return False, "Ещё действует пауза между сделками."
+            if self.pending_order:
+                return False, "Уже есть активная заявка."
+            if TRADING_MODE != "PAPER" and await self.client.position(SYMBOL):
+                return False, "По паре уже есть открытая позиция."
+
             try:
                 ticker, _ = await asyncio.gather(
                     self.client.ticker(SYMBOL), self.client.orderbook(SYMBOL, 10)
