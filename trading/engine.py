@@ -31,7 +31,6 @@ class TradingEngine:
         self.last_ai_hash = ""
         self.last_candidate = None
         self.pending_proposal = None
-        self.pending_order = self.state.get("pending_order")
         self.state = load()
         self.day = date.fromisoformat(self.state.get("day", date.today().isoformat()))
         self.trades_today = int(self.state.get("trades_today", 0))
