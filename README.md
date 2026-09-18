@@ -1,68 +1,259 @@
-# AI Trading Bot — Bybit + Telegram + OpenAI
+# 🤖 AI Trading Bot — Bybit + Telegram
 
-Telegram control bot for AI-assisted BTCUSDT perpetual day trading on Bybit.
+AI-ассистент для полуавтоматической торговли криптовалютными perpetual-контрактами на **Bybit** с управлением через **Telegram**.
 
-## Architecture
+Бот разделяет анализ рынка, управление риском и исполнение ордеров. AI помогает оценивать торговую идею, но не может отключить жёсткие ограничения риска.
 
-`Bybit market data → indicators → multi-timeframe strategy → AI confirmation → risk manager → order`
+## ⚙️ Как работает
 
-The strategy is capital-independent: set `CAPITAL_USDT` to any positive amount, or `0` to use the live USDT wallet balance.
+```
+Рынок Bybit
+   ↓
+5m + 15m анализ
+   ↓
+Технические фильтры
+   ↓
+AI-анализ
+   ↓
+Risk Manager
+   ↓
+Предложение в Telegram
+   ↓
+Подтверждение пользователя
+   ↓
+PAPER / DEMO / LIVE
+```
 
-## Safety defaults
+### AI выбирает
 
-- `DRY_RUN=true` by default.
-- Live trading requires both Bybit API credentials and `DRY_RUN=false`.
-- Bybit API keys must not have withdrawal permission.
-- Risk is calculated as a percentage of configured capital.
-- Position size is capped by notional exposure and exchange minimums.
-- Every live entry includes exchange-side stop-loss and take-profit parameters.
-- The Telegram bot cannot switch live trading on.
+- направление: **LONG / SHORT / NO TRADE**;
+- точку входа;
+- Stop Loss;
+- Take Profit;
+- оценку риска **1–10**;
+- уверенность и краткое обоснование;
+- условие отмены идеи.
 
-## Strategy
+### Бот контролирует независимо от AI
 
-- 5m execution timeframe.
-- 15m trend confirmation.
-- EMA 20/50/200.
-- RSI 14.
-- MACD.
-- ATR-based stop and target.
-- Volume ratio filter.
-- 20-bar breakout context.
-- Minimum signal score.
-- AI confirmation only after technical filters pass.
+- риск на сделку — **1% капитала**;
+- целевой результат — **1.5% капитала** при RR **1:1.5**;
+- максимальное плечо из настроек;
+- дневной лимит убытка;
+- максимальное количество сделок в день;
+- паузу между сделками;
+- минимальный размер позиции;
+- допустимое движение цены перед подтверждением;
+- подтверждение каждой сделки пользователем.
 
-## Environment
+AI не получает права самостоятельно отправлять торговый ордер.
 
-See `.env.example`.
+---
 
-For any account size, change only `CAPITAL_USDT` (or leave it at `0` to use the actual wallet balance). Risk is controlled by `RISK_PER_TRADE_PCT`.
+## 🧪 Режимы торговли
 
-## Telegram
+### PAPER
 
-- `/start` — overview
-- `/status` — engine/account state
-- `/trade` — latest technical signal
-- `/paper` — safety information
-- `/help` — commands
+Полностью внутренняя симуляция. Ордера на Bybit не отправляются.
 
-## Render
+Подходит для проверки стратегии и логики управления риском.
 
-The service runs with `python bot_main.py` and listens on `PORT`.
+### 🟡 DEMO
 
-A 24/7 trading process should run on an always-on Render plan. Do not rely on a sleeping/free instance for live trading.
+Используется **Bybit Demo Trading API** с виртуальными средствами.
 
-## OpenAI
+Рыночные данные берутся из среды Bybit Demo, а сделки не затрагивают реальные средства.
 
-The bot uses the OpenAI API, not the ChatGPT consumer subscription. GPT-5.6 Luna is the default because it is the low-cost GPT-5.6 API model; API usage is billed separately.
+### 🔴 LIVE
 
-## First launch
+Реальная торговля.
 
-1. Keep `DRY_RUN=true`.
-2. Add Telegram token.
-3. Add OpenAI API key if AI confirmation is enabled.
-4. Add Bybit API key/secret with Read + Trade and **without Withdraw**.
-5. Deploy and inspect `/status` and Render logs.
-6. Run paper mode long enough to collect a meaningful sample.
-7. Only then set `DRY_RUN=false` if you explicitly want live orders.
+LIVE дополнительно требует отдельного подтверждения режима, а каждая новая торговая идея всё равно требует подтверждения пользователя.
 
-This bot is an automated trading system, not a guarantee of profit. Backtest and paper-trade before risking funds.
+> По умолчанию проект должен запускаться безопасно: **PAPER + торговля OFF**.
+
+---
+
+## 📊 Анализ рынка
+
+Основной анализ выполняется на:
+
+- **5m** — рабочий таймфрейм;
+- **15m** — подтверждение направления.
+
+Используются:
+
+- EMA 20 / 50 / 200;
+- RSI 14;
+- MACD;
+- ATR;
+- объём и отношение объёма;
+- breakout-контекст;
+- рыночная структура;
+- spread;
+- order-book imbalance;
+- funding;
+- фильтры волатильности.
+
+AI вызывается не на каждый цикл проверки рынка. Бот сначала отбрасывает неподходящие ситуации локальными фильтрами, а AI подключается только для сформированной торговой идеи.
+
+---
+
+## 💰 Управление капиталом
+
+Размер счёта не зашит в код.
+
+В **PAPER** можно указать любой положительный капитал, например:
+
+```
+100 USDT
+450 USDT
+1000 USDT
+5000 USDT
+```
+
+Размер позиции рассчитывается от текущего капитала и расстояния до Stop Loss.
+
+Базовая политика:
+
+- риск сделки: **1%**;
+- цель: **1.5%**;
+- RR: **1:1.5**;
+- плечо: настраиваемое, базово **3x**.
+
+Фактический результат может отличаться от расчётного из-за комиссий, исполнения и рыночных условий.
+
+---
+
+## 📱 Telegram
+
+Главное меню:
+
+- 📊 **Статус** — состояние двигателя, капитал, P&L и ограничения;
+- 🎯 **Сигнал** — актуальное торговое предложение;
+- 💼 **Позиция** — вход, SL, TP, размер и риск;
+- 🛡 **Риск** — контроль дневного лимита и торговых ограничений;
+- ⚙️ **Настройки** — основные параметры без редактирования кода;
+- 🔧 **Режим** — PAPER / DEMO / LIVE;
+- ▶️ **Торговля** — разрешение или запрет новых входов.
+
+Пользовательские настройки сохраняются отдельно от логики стратегии.
+
+---
+
+## 🔐 Безопасность
+
+Рекомендуемые права Bybit API:
+
+- Read;
+- Trade;
+- **без Withdraw**.
+
+Секретные ключи не должны храниться в репозитории.
+
+Для LIVE рекомендуется использовать дополнительные ограничения API-ключа, если они доступны для конкретного аккаунта.
+
+Бот не должен считать отсутствие OpenAI API ключа основанием для автоматической торговли: при включённом AI без ключа новые AI-предложения блокируются.
+
+---
+
+## 🧠 OpenAI
+
+Проект использует **OpenAI API**, а не подписку ChatGPT.
+
+API-использование оплачивается отдельно от подписки ChatGPT.
+
+AI является отдельным аналитическим слоем и не получает прямого права менять системные ограничения риска или самостоятельно подтверждать сделки.
+
+Если OpenAI API недоступен, бот работает в безопасном режиме без AI-предложений.
+
+---
+
+## 🚀 Запуск
+
+### 1. Переменные окружения
+
+Скопируйте параметры из `.env.example` и задайте:
+
+- Telegram token;
+- Bybit API credentials;
+- при необходимости Bybit Demo API credentials;
+- OpenAI API key;
+- режим торговли.
+
+### 2. Безопасный первый запуск
+
+Начните с:
+
+```
+TRADING_MODE=PAPER
+TRADING_ENABLED=false
+```
+
+Проверьте Telegram-интерфейс, статус и PAPER-сценарии.
+
+### 3. Тестирование
+
+Рекомендуемый порядок:
+
+```
+PAPER
+  ↓
+Bybit DEMO
+  ↓
+LIVE
+```
+
+Не переходите к LIVE только потому, что бот технически запустился: сначала необходимо проверить поведение стратегии и риск-контроль на тестовых данных/виртуальных средствах.
+
+---
+
+## 🖥 Render
+
+Проект рассчитан на запуск как постоянно работающий сервис.
+
+На Render необходимо обеспечить корректный Start Command и необходимые environment variables.
+
+Для постоянной торговли нужен тариф/режим хостинга, который не усыпляет сервис.
+
+---
+
+## 🗂 Структура проекта
+
+```
+trading/
+├── engine.py          # торговый цикл и управление состоянием
+├── bybit.py           # Bybit API
+├── strategy.py        # технические сигналы
+├── ai.py              # AI-анализ
+├── risk.py             # риск-контроль
+├── entry_policy.py    # правила входа
+├── state.py            # состояние и журнал
+└── user_config.py      # пользовательские настройки
+
+bot_main_v3.py          # Telegram-интерфейс
+config.py               # конфигурация
+```
+
+---
+
+## ⚠️ Важно
+
+Это программный торговый инструмент, а не гарантия прибыли.
+
+Криптовалютные деривативы и торговля с плечом несут высокий финансовый риск. Тестируйте систему в **PAPER/DEMO** и проверяйте расчёты до использования реальных средств.
+
+---
+
+## 📌 Статус проекта
+
+Проект находится в активной разработке.
+
+Текущий приоритет:
+
+1. стабильность торгового ядра;
+2. корректное управление PAPER/DEMO/LIVE;
+3. защита капитала;
+4. ручное подтверждение сделок;
+5. полноценное тестирование;
+6. после этого — дальнейшее оформление Telegram-интерфейса.
