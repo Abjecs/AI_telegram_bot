@@ -31,14 +31,17 @@ class TradingEngine:
         self.last_ai_hash = ""
         self.last_candidate = None
         self.pending_proposal = None
-        self.pending_order = None
+        self.pending_order = self.state.get("pending_order")
         self.state = load()
         self.day = date.fromisoformat(self.state.get("day", date.today().isoformat()))
         self.trades_today = int(self.state.get("trades_today", 0))
         self.realized_today = float(self.state.get("realized_today", 0.0))
         self.starting_equity = float(self.state.get("starting_equity", 0.0))
-        self.last_trade_at = None
+        self.last_trade_at = datetime.fromisoformat(self.state["last_trade_at"]) if self.state.get("last_trade_at") else None
+        self.pending_order = self.state.get("pending_order")
+        self.live_armed = False
         self.paper_position = self.state.get("position")
+        self.paper_capital = float(self.state.get("paper_capital", PAPER_CAPITAL_USDT))
         self.last_price = 0.0
         self.last_atr = 0.0
         self.qty_step = 0.001
@@ -49,17 +52,14 @@ class TradingEngine:
     async def start(self):
         self.running = True
         await self.client.start()
-        if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-            logger.warning("Bybit credentials are not configured")
-            return
         await self._load_instrument()
         try:
             equity = await self._equity()
             if equity > 0 and self.starting_equity <= 0:
                 self.starting_equity = equity
                 self._persist()
-            logger.info("AI trading engine started symbol=%s dry_run=%s leverage=%sx equity=%.4f",
-                        SYMBOL, DRY_RUN, LEVERAGE, equity)
+            logger.info("AI trading engine started symbol=%s mode=%s leverage=%sx equity=%.4f",
+                        SYMBOL, TRADING_MODE, LEVERAGE, equity)
         except Exception as exc:
             self.last_error = str(exc)
             logger.warning("Initial Bybit account check failed: %s", exc)
@@ -85,17 +85,17 @@ class TradingEngine:
 
     def _persist(self):
         self.state.update({
-            "day": self.day.isoformat(),
-            "trades_today": self.trades_today,
-            "realized_today": self.realized_today,
-            "starting_equity": self.starting_equity,
-            "position": self.paper_position,
+            "day": self.day.isoformat(), "trades_today": self.trades_today,
+            "realized_today": self.realized_today, "starting_equity": self.starting_equity,
+            "position": self.paper_position, "pending_order": self.pending_order,
+            "last_trade_at": self.last_trade_at.isoformat() if self.last_trade_at else None,
+            "paper_capital": self.paper_capital,
         })
         save(self.state)
 
     async def _equity(self):
-        if not BYBIT_API_KEY or not BYBIT_API_SECRET:
-            return 0.0
+        if TRADING_MODE == "PAPER":
+            return self.paper_capital
         return await self.client.balance()
 
     def _reset_day(self, equity):
@@ -231,7 +231,7 @@ class TradingEngine:
                 if self.pending_order:
                     await self._monitor_pending_order()
                     return None
-                if not DRY_RUN and await self.client.position(SYMBOL):
+                if TRADING_MODE != "PAPER" and await self.client.position(SYMBOL):
                     return None
                 if self.paper_position or self._cooldown_active():
                     return None
@@ -362,7 +362,7 @@ class TradingEngine:
 
                 self.pending_proposal = None
 
-                if DRY_RUN:
+                if TRADING_MODE == "PAPER":
                     now = datetime.now(timezone.utc)
                     self.paper_position = {
                         "side": proposal["side"], "qty": qty, "entry": maker_price,
@@ -379,6 +379,9 @@ class TradingEngine:
                     self._persist()
                     return True, f"PAPER: maker-вход {self._fmt(maker_price)}. Позиция создана."
 
+                if TRADING_MODE == "LIVE" and not self.live_armed:
+                    self.pending_proposal = proposal
+                    return False, "LIVE заблокирован: сначала подтверди LIVE отдельной кнопкой."
                 await self.client.set_leverage(SYMBOL, LEVERAGE)
                 order_link = f"ai-{proposal_id}"
                 result = await self.client.create_postonly_order(
@@ -391,10 +394,9 @@ class TradingEngine:
                     "proposal": proposal,
                     "created_at": time.time(),
                 }
-                self.trades_today += 1
                 self.last_trade_at = datetime.now(timezone.utc)
                 self._persist()
-                return True, f"LIVE: PostOnly заявка размещена по {self._fmt(maker_price)}."
+                return True, f"{TRADING_MODE}: PostOnly заявка размещена по {self._fmt(maker_price)}."
 
             except Exception as exc:
                 self.last_error = str(exc)
@@ -426,9 +428,13 @@ class TradingEngine:
             if not status:
                 return
             state = str(status.get("orderStatus", ""))
-            if state in {"Filled", "PartiallyFilled"}:
-                append_journal(self.state, "LIVE_ORDER_UPDATE", status)
+            if state == "Filled":
+                append_journal(self.state, f"{TRADING_MODE}_ORDER_FILLED", status)
+                self.trades_today += 1
                 self.pending_order = None
+                self._persist()
+            elif state == "PartiallyFilled":
+                append_journal(self.state, f"{TRADING_MODE}_ORDER_PARTIAL", status)
                 self._persist()
             elif state in {"Cancelled", "Rejected", "Deactivated"}:
                 self.pending_order = None
@@ -468,13 +474,13 @@ class TradingEngine:
         position = None
         try:
             balance = await self._equity()
-            if balance and not DRY_RUN:
+            if balance and TRADING_MODE != "PAPER":
                 position = await self.client.position(SYMBOL)
         except Exception as exc:
             self.last_error = str(exc)
         return {
-            "symbol": SYMBOL, "dry_run": DRY_RUN,
-            "trading_enabled": TRADING_ENABLED, "capital": balance,
+            "symbol": SYMBOL, "mode": TRADING_MODE, "dry_run": TRADING_MODE == "PAPER",
+            "trading_enabled": TRADING_ENABLED, "capital": balance, "live_armed": self.live_armed,
             "position": position or self.paper_position,
             "trades_today": self.trades_today,
             "realized_today": self.realized_today,
@@ -486,6 +492,27 @@ class TradingEngine:
             "last_cycle": self.last_cycle.isoformat() if self.last_cycle else None,
             "last_error": self.last_error,
         }
+
+
+    def set_mode(self, mode: str):
+        mode = mode.upper().strip()
+        if mode not in {"PAPER", "DEMO", "LIVE"}:
+            raise ValueError("mode must be PAPER, DEMO or LIVE")
+        self.live_armed = False
+        self.pending_proposal = None
+        return mode
+
+    def arm_live(self, confirmed: bool):
+        self.live_armed = bool(confirmed) and TRADING_MODE == "LIVE"
+        return self.live_armed
+
+    def set_paper_capital(self, amount: float):
+        if amount <= 0:
+            raise ValueError("paper capital must be > 0")
+        self.paper_capital = float(amount)
+        if TRADING_MODE == "PAPER" and not self.paper_position:
+            self.starting_equity = self.paper_capital
+        self._persist()
 
     async def run(self):
         self.running = True
