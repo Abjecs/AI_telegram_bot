@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
+
 import aiohttp
 
 from config import AI_ENABLED, AI_FAIL_CLOSED, AI_MODEL, OPENAI_API_KEY, OPENAI_BASE_URL
 
+logger = logging.getLogger(__name__)
 
 SCHEMA = {
     "type": "object",
@@ -22,22 +25,32 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
+_warned_missing_key = False
+
+
+def available() -> bool:
+    return bool(AI_ENABLED and OPENAI_API_KEY)
+
 
 async def analyze_market(context: dict) -> dict | None:
+    global _warned_missing_key
+
     if not AI_ENABLED:
         return None
+
     if not OPENAI_API_KEY:
-        if AI_FAIL_CLOSED:
-            raise RuntimeError("OpenAI key is missing")
+        if not _warned_missing_key:
+            logger.warning("AI is enabled but OPENAI_API_KEY is not configured; AI proposals are disabled until a key is added.")
+            _warned_missing_key = True
+        # Fail closed means: no AI answer -> no trade. It must not crash the trading loop.
         return None
 
     instructions = (
         "You are the decision layer of a crypto day-trading bot. Analyze only the supplied market snapshot. "
-        "You may choose LONG, SHORT, or NO_TRADE. If a trade is justified, choose a realistic LIMIT entry that "
-        "has a reasonable chance to rest on the book rather than crossing it. Set stop and take yourself using market "
-        "structure, volatility, liquidity and the user's required reward/risk ratio. The hard constraints in the input "
-        "cannot be violated. Risk score is 1-10 where 10 is highest risk. Do not invent news or market data. "
-        "Do not place, request, or simulate an order. Return only the requested structured object."
+        "Choose LONG, SHORT, or NO_TRADE. If a trade is justified, choose a realistic maker LIMIT entry. "
+        "Set stop and take from market structure, volatility and liquidity. The hard constraints in the input "
+        "cannot be violated. Risk score 1-10 means 10 is highest risk. Never invent news or data. "
+        "Do not place or simulate orders. Return only the requested structured object."
     )
     user = json.dumps(context, separators=(",", ":"), ensure_ascii=False)
     payload = {
@@ -45,19 +58,35 @@ async def analyze_market(context: dict) -> dict | None:
         "store": False,
         "instructions": instructions,
         "input": user,
-        "text": {"format": {"type": "json_schema", "name": "trade_proposal", "strict": True, "schema": SCHEMA}},
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "trade_proposal",
+                "strict": True,
+                "schema": SCHEMA,
+            }
+        },
     }
+
     timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.post(
-            OPENAI_BASE_URL.rstrip("/") + "/responses",
-            json=payload,
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-        ) as response:
-            data = await response.json(content_type=None)
-            if response.status >= 400:
-                message = data.get("error", {}).get("message", "request failed") if isinstance(data, dict) else "request failed"
-                raise RuntimeError(f"AI HTTP {response.status}: {message}")
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                OPENAI_BASE_URL.rstrip("/") + "/responses",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+            ) as response:
+                data = await response.json(content_type=None)
+                if response.status >= 400:
+                    message = data.get("error", {}).get("message", "request failed") if isinstance(data, dict) else "request failed"
+                    raise RuntimeError(f"AI HTTP {response.status}: {message}")
+    except Exception as exc:
+        # AI is a filter, never a reason for the Bybit/Telegram engine to crash.
+        logger.warning("AI analysis unavailable: %s", exc)
+        return None
 
     text = data.get("output_text", "")
     if not text:
@@ -66,9 +95,18 @@ async def analyze_market(context: dict) -> dict | None:
                 if content.get("type") == "output_text":
                     text = content.get("text", "")
                     break
+            if text:
+                break
+
     if not text:
-        raise RuntimeError("AI returned no structured output")
-    result = json.loads(text)
-    result["risk_score"] = int(result["risk_score"])
-    result["confidence"] = int(result["confidence"])
-    return result
+        logger.warning("AI returned no structured output")
+        return None
+
+    try:
+        result = json.loads(text)
+        result["risk_score"] = int(result["risk_score"])
+        result["confidence"] = int(result["confidence"])
+        return result
+    except (TypeError, ValueError, json.JSONDecodeError, KeyError) as exc:
+        logger.warning("AI returned invalid structured output: %s", exc)
+        return None
