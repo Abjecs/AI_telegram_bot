@@ -50,7 +50,8 @@ async def analyze_market(context: dict) -> dict | None:
         "Choose LONG, SHORT, or NO_TRADE. If a trade is justified, choose a realistic maker LIMIT entry. "
         "Set stop and take from market structure, volatility and liquidity. The hard constraints in the input "
         "cannot be violated. Risk score 1-10 means 10 is highest risk. Never invent news or data. "
-        "Do not place or simulate orders. Return only the requested structured object."
+        "Do not place or simulate orders. Return only the requested structured object. "
+        "Write the rationale and invalidation fields in Russian, concise and factual."
     )
     user = json.dumps(context, separators=(",", ":"), ensure_ascii=False)
     payload = {
