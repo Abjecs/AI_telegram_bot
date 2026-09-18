@@ -38,7 +38,9 @@ class TradingEngine:
         self.starting_equity = float(self.state.get("starting_equity", 0.0))
         self.last_trade_at = datetime.fromisoformat(self.state["last_trade_at"]) if self.state.get("last_trade_at") else None
         self.pending_order = self.state.get("pending_order")
+        self.exchange_trade = self.state.get("exchange_trade")
         self.live_armed = False
+        self.event_callback = None
         self.paper_position = self.state.get("position")
         self.paper_capital = float(self.state.get("paper_capital", PAPER_CAPITAL_USDT))
         self.last_price = 0.0
@@ -87,6 +89,7 @@ class TradingEngine:
             "day": self.day.isoformat(), "trades_today": self.trades_today,
             "realized_today": self.realized_today, "starting_equity": self.starting_equity,
             "position": self.paper_position, "pending_order": self.pending_order,
+            "exchange_trade": self.exchange_trade,
             "last_trade_at": self.last_trade_at.isoformat() if self.last_trade_at else None,
             "paper_capital": self.paper_capital,
         })
@@ -214,6 +217,48 @@ class TradingEngine:
         max_notional = equity * MAX_POSITION_NOTIONAL_PCT / 100 * LEVERAGE
         return min(qty, self._round_qty(max_notional / max(entry, 1e-9)))
 
+    async def _emit_event(self, text):
+        if not text or not self.event_callback:
+            return
+        try:
+            await self.event_callback(text)
+        except Exception as exc:
+            logger.warning("Trade notification failed: %s", exc)
+
+    async def _handle_exchange_close(self):
+        trade = self.exchange_trade
+        if not trade:
+            return
+        try:
+            closed = await self.client.closed_pnl(SYMBOL)
+            if not closed:
+                return
+            item = closed[0]
+            closed_at = int(item.get("updatedTime", 0) or 0)
+            opened_at = int(trade.get("opened_at_ms", 0) or 0)
+            if opened_at and closed_at and closed_at < opened_at:
+                return
+            pnl = float(item.get("closedPnl", 0) or 0)
+            result = "TP" if pnl >= 0 else "SL/OTHER"
+            payload = {
+                **trade,
+                "exit": float(item.get("avgExitPrice", 0) or 0),
+                "pnl": pnl,
+                "result": result,
+                "closed_pnl": item,
+            }
+            append_journal(self.state, f"{TRADING_MODE}_CLOSE", payload)
+            self.realized_today += pnl
+            self.exchange_trade = None
+            self._persist()
+            await self._emit_event(
+                f"{'🟢' if pnl >= 0 else '🔴'} {TRADING_MODE}: позиция закрыта.\n"
+                f"{SYMBOL}\nРезультат: {result}\nP&L: {pnl:+.4f} USDT"
+            )
+        except Exception as exc:
+            self.last_error = str(exc)
+            logger.warning("Exchange close check failed: %s", exc)
+
     async def cycle(self):
         async with self._lock:
             self.last_cycle = datetime.now(timezone.utc)
@@ -228,8 +273,23 @@ class TradingEngine:
                     await self._monitor_pending_order()
                     return None
 
-                if TRADING_MODE != "PAPER" and await self.client.position(SYMBOL):
-                    return None
+                if TRADING_MODE != "PAPER":
+                    exchange_position = await self.client.position(SYMBOL)
+                    if exchange_position:
+                        if not self.exchange_trade:
+                            self.exchange_trade = {
+                                "side": exchange_position.get("side"),
+                                "qty": float(exchange_position.get("size", 0) or 0),
+                                "entry": float(exchange_position.get("avgPrice", 0) or 0),
+                                "stop": float(exchange_position.get("stopLoss", 0) or 0),
+                                "take": float(exchange_position.get("takeProfit", 0) or 0),
+                                "opened_at_ms": int(time.time() * 1000),
+                            }
+                            self._persist()
+                        return None
+                    if self.exchange_trade:
+                        await self._handle_exchange_close()
+                        return None
 
                 if self.paper_position:
                     ticker = await self.client.ticker(SYMBOL)
@@ -298,11 +358,12 @@ class TradingEngine:
 
                 entry = float(result["entry"])
                 stop = float(result["stop"])
-                take = float(result["take"])
+                # AI may suggest TP, but the bot owns the hard RR constraint.
                 stop_distance = abs(entry - stop)
-                reward_distance = abs(take - entry)
-                if min(entry, stop, take) <= 0 or stop_distance <= 0:
+                if min(entry, stop) <= 0 or stop_distance <= 0:
                     return None
+                take = entry + stop_distance * TARGET_RR if signal.side == "Buy" else entry - stop_distance * TARGET_RR
+                reward_distance = abs(take - entry)
                 if reward_distance / stop_distance + 1e-9 < TARGET_RR:
                     return None
                 if signal.side == "Buy" and not stop < entry < take:
@@ -379,8 +440,11 @@ class TradingEngine:
                 )
                 equity = await self._equity()
                 stop = float(proposal["stop"])
-                take = float(proposal["take"])
-                qty = self._size_position(equity, maker_price, abs(maker_price - stop))
+                stop_distance = abs(maker_price - stop)
+                if stop_distance <= 0:
+                    return False, "Некорректное расстояние до SL после подтверждения."
+                take = maker_price + stop_distance * TARGET_RR if proposal["side"] == "Buy" else maker_price - stop_distance * TARGET_RR
+                qty = self._size_position(equity, maker_price, stop_distance)
                 if qty < self.min_qty:
                     return False, "После повторной проверки размер позиции меньше минимального."
 
@@ -415,7 +479,7 @@ class TradingEngine:
                 self.pending_order = {
                     "order_id": result.get("orderId"),
                     "order_link_id": order_link,
-                    "proposal": proposal,
+                    "proposal": {**proposal, "entry": maker_price, "stop": stop, "take": take, "qty": qty, "rr": TARGET_RR},
                     "created_at": time.time(),
                 }
                 self.last_trade_at = datetime.now(timezone.utc)
@@ -453,10 +517,27 @@ class TradingEngine:
                 return
             state = str(status.get("orderStatus", ""))
             if state == "Filled":
-                append_journal(self.state, f"{TRADING_MODE}_ORDER_FILLED", status)
+                proposal = order.get("proposal", {})
+                avg_price = float(status.get("avgPrice", 0) or proposal.get("entry", 0) or 0)
+                filled_qty = float(status.get("cumExecQty", 0) or proposal.get("qty", 0) or 0)
+                self.exchange_trade = {
+                    "side": proposal.get("side"),
+                    "qty": filled_qty,
+                    "entry": avg_price,
+                    "stop": float(proposal.get("stop", 0) or 0),
+                    "take": float(proposal.get("take", 0) or 0),
+                    "opened_at_ms": int(time.time() * 1000),
+                    "order_id": order.get("order_id"),
+                }
+                append_journal(self.state, f"{TRADING_MODE}_ORDER_FILLED", status | {"entry": avg_price, "qty": filled_qty})
                 self.trades_today += 1
                 self.pending_order = None
                 self._persist()
+                await self._emit_event(
+                    f"🟡 {TRADING_MODE}: позиция открыта.\n"
+                    f"{SYMBOL} {proposal.get('side')}\n"
+                    f"Вход: {avg_price:.4f}\nSL: {float(proposal.get('stop', 0) or 0):.4f}\nTP: {float(proposal.get('take', 0) or 0):.4f}"
+                )
             elif state == "PartiallyFilled":
                 append_journal(self.state, f"{TRADING_MODE}_ORDER_PARTIAL", status)
                 self._persist()
@@ -488,6 +569,11 @@ class TradingEngine:
         })
         self.paper_position = None
         self._persist()
+        await self._emit_event(
+            f"{'🟢' if pnl >= 0 else '🔴'} PAPER: позиция закрыта.\n"
+            f"{SYMBOL}\nРезультат: {result}\nВыход: {exit_price:.4f}\n"
+            f"P&L: {pnl:+.4f} USDT\nКапитал: {self.paper_capital:.4f} USDT"
+        )
 
     async def status(self):
         balance = 0.0
