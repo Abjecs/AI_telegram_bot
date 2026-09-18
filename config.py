@@ -68,5 +68,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
 AI_MODEL = os.getenv("AI_MODEL", "gpt-5.6-luna").strip()
 
+if TRADING_ENABLED and TRADING_MODE == "DEMO" and (not BYBIT_DEMO_API_KEY or not BYBIT_DEMO_API_SECRET):
+    raise RuntimeError("DEMO trading requires BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET")
 if TRADING_ENABLED and TRADING_MODE == "LIVE" and (not BYBIT_API_KEY or not BYBIT_API_SECRET):
     raise RuntimeError("LIVE trading requires BYBIT_API_KEY and BYBIT_API_SECRET")
