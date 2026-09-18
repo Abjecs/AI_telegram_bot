@@ -162,7 +162,7 @@ class TradingEngine:
     def _candidate_hash(self, signal, latest, ticker, imbalance):
         raw = "|".join([
             SYMBOL, signal.side, str(signal.score),
-            f"{float(latest.close):.2f}", f"{float(latest["atr"]):.2f}",
+            f"{float(latest.close):.2f}", f"{float(latest['atr']):.2f}",
             f"{float(ticker.get('lastPrice', 0)):.2f}", f"{imbalance:.3f}",
         ])
         return hashlib.sha256(raw.encode()).hexdigest()
