@@ -179,7 +179,12 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     subscribers.add(update.effective_chat.id)
     data = await engine.status()
     p = data["position"]
-    pos = f"{p.get('side')} {p.get('qty', p.get('size'))} @ {p.get('entry', p.get('avgPrice'))}\nSL {p.get('stop','—')} • TP {p.get('take','—')}" if p else "нет"
+    if p:
+        p_stop = p.get("stop", p.get("stopLoss", "—"))
+        p_take = p.get("take", p.get("takeProfit", "—"))
+        pos = f"{p.get('side')} {p.get('qty', p.get('size'))} @ {p.get('entry', p.get('avgPrice'))}\nSL {p_stop} • TP {p_take}"
+    else:
+        pos = "нет"
     armed = "ARMED" if data["live_armed"] else "не подтверждён"
     text = (
         f"📊 {data['symbol']}\n\nРежим: {data['mode']}\nТорговля: {'ON' if data['trading_enabled'] else 'OFF'}\n"
@@ -202,8 +207,8 @@ async def position(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     side = "🟢 LONG" if p.get("side") == "Buy" else "🔴 SHORT"
     entry = float(p.get("entry", p.get("avgPrice", 0)) or 0)
-    stop = float(p.get("stop", 0) or 0)
-    take = float(p.get("take", 0) or 0)
+    stop = float(p.get("stop", p.get("stopLoss", 0)) or 0)
+    take = float(p.get("take", p.get("takeProfit", 0)) or 0)
     qty = float(p.get("qty", p.get("size", 0)) or 0)
     risk = float(p.get("risk_usdt", abs(entry-stop)*qty) or 0)
     target = float(p.get("target_usdt", abs(take-entry)*qty) or 0)
