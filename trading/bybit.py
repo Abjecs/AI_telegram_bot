@@ -127,6 +127,14 @@ class BybitClient:
         if not order_id and not order_link_id: raise BybitError("cancel_order requires order_id or order_link_id")
         return await self._request("POST","/v5/order/cancel",body={"category":"linear","symbol":symbol,"orderId":order_id,"orderLinkId":order_link_id},private=True)
 
+    async def closed_pnl(self, symbol):
+        result = await self._request(
+            "GET", "/v5/position/closed-pnl",
+            {"category":"linear","symbol":symbol,"limit":1},
+            private=True,
+        )
+        return result.get("list", [])
+
     async def close_market(self,symbol,position):
         side = "Sell" if position["side"]=="Buy" else "Buy"
         return await self._request("POST","/v5/order/create",body={"category":"linear","symbol":symbol,"side":side,"orderType":"Market","qty":position["size"],"reduceOnly":True,"positionIdx":0},private=True)
