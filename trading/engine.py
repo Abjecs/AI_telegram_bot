@@ -98,7 +98,8 @@ class TradingEngine:
     async def _equity(self):
         if TRADING_MODE == "PAPER":
             return self.paper_capital
-        return await self.client.balance()
+        exchange_equity = await self.client.balance()
+        return TRADE_CAPITAL_USDT if TRADE_CAPITAL_USDT > 0 else exchange_equity
 
     def _reset_day(self, equity):
         today = datetime.now(timezone.utc).date()
@@ -496,6 +497,53 @@ class TradingEngine:
             return True
         return False
 
+    async def close_position(self):
+        """Manually close the current position. Never opens a new order."""
+        async with self._lock:
+            try:
+                if TRADING_MODE == "PAPER":
+                    position = self.paper_position
+                    if not position:
+                        return False, "Открытой позиции нет."
+                    ticker = await self.client.ticker(SYMBOL)
+                    exit_price = float(ticker.get("lastPrice", 0) or 0)
+                    if exit_price <= 0:
+                        return False, "Не удалось получить текущую цену."
+                    side = position["side"]
+                    direction = 1 if side == "Buy" else -1
+                    pnl = (exit_price - float(position["entry"])) * float(position["qty"]) * direction
+                    self.realized_today += pnl
+                    self.paper_capital = max(0.0, self.paper_capital + pnl)
+                    append_journal(self.state, "PAPER_CLOSE_MANUAL", {
+                        **position, "exit": exit_price, "pnl": pnl, "result": "MANUAL",
+                    })
+                    self.paper_position = None
+                    self._persist()
+                    await self._emit_event(
+                        f"{'🟢' if pnl >= 0 else '🔴'} PAPER: позиция закрыта вручную.\n"
+                        f"{SYMBOL}\nВыход: {exit_price:.4f}\nP&L: {pnl:+.4f} USDT"
+                    )
+                    return True, f"PAPER: позиция закрыта по {self._fmt(exit_price)}. P&L {pnl:+.4f} USDT"
+
+                position = await self.client.position(SYMBOL)
+                if not position:
+                    return False, "Открытой позиции нет."
+                side = position.get("side")
+                qty = float(position.get("size", 0) or 0)
+                if side not in {"Buy", "Sell"} or qty <= 0:
+                    return False, "Не удалось определить размер позиции."
+                result = await self.client.close_position(SYMBOL, side, self._fmt(qty))
+                self.pending_order = None
+                self.exchange_trade = None
+                self._persist()
+                await self._emit_event(
+                    f"🟠 {TRADING_MODE}: отправлено закрытие позиции.\n{SYMBOL}\nРазмер: {qty:g}"
+                )
+                return True, f"{TRADING_MODE}: команда закрытия отправлена."
+            except Exception as exc:
+                self.last_error = str(exc)
+                return False, f"Закрытие не выполнено: {exc}"
+
     async def _monitor_pending_order(self):
         if not self.pending_order:
             return
@@ -595,6 +643,7 @@ class TradingEngine:
             "rr": TARGET_RR, "risk_filter": MAX_AI_RISK_SCORE,
             "pending_proposal": self.pending_proposal,
             "pending_order": self.pending_order,
+            "trade_capital": TRADE_CAPITAL_USDT,
             "last_cycle": self.last_cycle.isoformat() if self.last_cycle else None,
             "last_error": self.last_error,
         }
