@@ -59,6 +59,8 @@ def menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Статус", callback_data="status"),
          InlineKeyboardButton("🎯 Сигнал", callback_data="signal")],
+        [InlineKeyboardButton("💼 Позиция", callback_data="position"),
+         InlineKeyboardButton("🛡 Риск", callback_data="risk")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="settings"),
          InlineKeyboardButton("🔧 Режим", callback_data="mode")],
         [InlineKeyboardButton("▶️ Торговля", callback_data="toggle_trading"),
@@ -173,6 +175,49 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Последний цикл: {data['last_cycle'] or '—'}\nОшибка: {data['last_error'] or 'нет'}"
     )
     await reply(update, text, menu())
+
+async def position(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not private(update): return
+    p = engine.paper_position
+    if not p:
+        data = await engine.status()
+        p = data.get("position")
+    if not p:
+        await reply(update, "💼 ПОЗИЦИЯ\n\nОткрытой позиции нет.", menu())
+        return
+    side = "🟢 LONG" if p.get("side") == "Buy" else "🔴 SHORT"
+    entry = float(p.get("entry", p.get("avgPrice", 0)) or 0)
+    stop = float(p.get("stop", 0) or 0)
+    take = float(p.get("take", 0) or 0)
+    qty = float(p.get("qty", p.get("size", 0)) or 0)
+    risk = float(p.get("risk_usdt", abs(entry-stop)*qty) or 0)
+    target = float(p.get("target_usdt", abs(take-entry)*qty) or 0)
+    await reply(update, (
+        f"💼 ПОЗИЦИЯ • {engine_module.SYMBOL}\n\n"
+        f"{side}\nВход: {entry:.8f}\nSL: {stop:.8f}\nTP: {take:.8f}\n"
+        f"Размер: {qty:.8f}\nРиск: {risk:.4f} USDT\nЦель: {target:.4f} USDT\n"
+        f"Плечо: {p.get('leverage', engine_module.LEVERAGE)}x"
+    ), menu())
+
+async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not private(update): return
+    data = await engine.status()
+    limit = float(data.get("daily_limit", 0) or 0)
+    pnl = float(data.get("realized_today", 0) or 0)
+    used = max(0.0, -pnl)
+    pct = (used / limit * 100) if limit > 0 else 0.0
+    threshold = engine_module.MAX_AI_RISK_SCORE
+    await reply(update, (
+        "🛡 КОНТРОЛЬ РИСКА\n\n"
+        f"Риск сделки: {engine_module.RISK_PER_TRADE_PCT:g}%\n"
+        f"Цель: {engine_module.TARGET_RR:g}R\n"
+        f"Дневной лимит: {limit:.4f} USDT ({engine_module.MAX_DAILY_LOSS_PCT:g}%)\n"
+        f"Использовано: {used:.4f} USDT ({pct:.1f}%)\n"
+        f"AI-фильтр: ≤ {threshold}/10\n"
+        f"Сделки сегодня: {data['trades_today']} / {engine_module.MAX_TRADES_PER_DAY}\n"
+        f"Пауза: {'активна' if engine._cooldown_active() else 'нет'}\n\n"
+        "Жёсткие ограничения не изменяются AI."
+    ), menu())
 
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not private(update): return
@@ -330,6 +375,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d=="home": await start(update,context); return
     if d=="status": await status(update,context); return
     if d=="settings": await settings(update,context); return
+    if d=="position": await position(update,context); return
+    if d=="risk": await risk(update,context); return
     if d.startswith("edit:"):
         name = d.split(":",1)[1]
         labels = {
