@@ -61,6 +61,8 @@ def menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🎯 Сигнал", callback_data="signal")],
         [InlineKeyboardButton("💼 Позиция", callback_data="position"),
          InlineKeyboardButton("🛡 Риск", callback_data="risk")],
+        [InlineKeyboardButton("📈 Статистика", callback_data="stats"),
+         InlineKeyboardButton("📜 Журнал", callback_data="journal")],
         [InlineKeyboardButton("⚙️ Настройки", callback_data="settings"),
          InlineKeyboardButton("🔧 Режим", callback_data="mode")],
         [InlineKeyboardButton("▶️ Торговля", callback_data="toggle_trading"),
@@ -219,6 +221,46 @@ async def risk(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Жёсткие ограничения не изменяются AI."
     ), menu())
 
+def trade_stats():
+    journal = engine.state.get("journal", [])
+    closes = [x for x in journal if x.get("event") == "PAPER_CLOSE"]
+    wins = sum(1 for x in closes if x.get("result") == "TP")
+    losses = sum(1 for x in closes if x.get("result") == "SL")
+    pnl = sum(float(x.get("pnl", 0) or 0) for x in closes)
+    total = len(closes)
+    win_rate = (wins / total * 100) if total else 0.0
+    return total, wins, losses, pnl, win_rate
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not private(update): return
+    total, wins, losses, pnl, win_rate = trade_stats()
+    await reply(update, (
+        "📈 СТАТИСТИКА PAPER\n\n"
+        f"Закрытых сделок: {total}\n"
+        f"TP: {wins} • SL: {losses}\n"
+        f"Win rate: {win_rate:.1f}%\n"
+        f"P&L: {pnl:+.4f} USDT\n"
+        f"Текущий капитал: {engine.paper_capital:.4f} USDT\n"
+        f"Сделок сегодня: {engine.trades_today} / {engine_module.MAX_TRADES_PER_DAY}"
+    ), menu())
+
+async def journal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not private(update): return
+    events = [x for x in engine.state.get("journal", []) if x.get("event") in {"PAPER_CLOSE", "PAPER_OPEN_CONFIRMED"}][-8:]
+    if not events:
+        await reply(update, "📜 ЖУРНАЛ\n\nПока записей нет.", menu())
+        return
+    lines = ["📜 ПОСЛЕДНИЕ СОБЫТИЯ", ""]
+    for x in reversed(events):
+        when = str(x.get("time", "")).replace("T", " ")[:16]
+        event = x.get("event", "")
+        if event == "PAPER_CLOSE":
+            lines.append(f"{when} • {x.get('result','?')} • P&L {float(x.get('pnl',0) or 0):+.4f} USDT")
+        else:
+            side = "LONG" if x.get("side") == "Buy" else "SHORT"
+            lines.append(f"{when} • OPEN {side} @ {float(x.get('entry',0) or 0):.2f}")
+    await reply(update, "\n".join(lines), menu())
+
 async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not private(update): return
     await reply(update, settings_text(), settings_menu())
@@ -233,6 +275,8 @@ async def text_setting_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
     raw = (update.effective_message.text or "").strip()
     try:
         if name == "SYMBOL":
+            if engine.paper_position or engine.pending_order:
+                raise ValueError("Сначала закрой активную позицию или заявку")
             value = raw.upper()
             if not value.endswith("USDT") or len(value) < 6:
                 raise ValueError("Пара должна быть вида BTCUSDT")
@@ -306,6 +350,7 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name, raw = context.args[0].lower(), context.args[1].lower()
     try:
         if name == "symbol":
+            if engine.paper_position or engine.pending_order: raise ValueError("Сначала закрой активную позицию или заявку")
             value = context.args[1].upper()
             if not value.endswith("USDT") or len(value) < 6: raise ValueError("Пара должна быть BTCUSDT")
             engine_module.SYMBOL = value
@@ -377,6 +422,8 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if d=="settings": await settings(update,context); return
     if d=="position": await position(update,context); return
     if d=="risk": await risk(update,context); return
+    if d=="stats": await stats(update,context); return
+    if d=="journal": await journal(update,context); return
     if d.startswith("edit:"):
         name = d.split(":",1)[1]
         labels = {
