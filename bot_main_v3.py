@@ -41,6 +41,8 @@ PERSISTED_SETTINGS = ("SYMBOL", "LEVERAGE", "MAX_DAILY_LOSS_PCT", "TARGET_RR",
 def restore_settings() -> None:
     settings = engine.state.get("settings", {})
     for name in PERSISTED_SETTINGS:
+        if name == "TRADING_MODE" and "TRADING_MODE" in __import__("os").environ:
+            continue
         if name in settings:
             setattr(config_module, name, settings[name])
             setattr(engine_module, name, settings[name])
