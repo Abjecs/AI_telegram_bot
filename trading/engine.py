@@ -627,8 +627,12 @@ class TradingEngine:
         balance = 0.0
         position = None
         try:
-            balance = await self._equity()
-            if balance and TRADING_MODE != "PAPER":
+            if TRADING_MODE == "PAPER":
+                balance = self.paper_capital
+            else:
+                # Always display the real exchange balance; user-selected
+                # trade capital is used only for risk/position sizing.
+                balance = await self.client.balance()
                 position = await self.client.position(SYMBOL)
         except Exception as exc:
             self.last_error = str(exc)
