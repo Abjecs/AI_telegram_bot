@@ -532,7 +532,7 @@ class TradingEngine:
                 qty = float(position.get("size", 0) or 0)
                 if side not in {"Buy", "Sell"} or qty <= 0:
                     return False, "Не удалось определить размер позиции."
-                result = await self.client.close_position(SYMBOL, side, self._fmt(qty))
+                result = await self.client.close_market(SYMBOL, {"side": side, "size": self._fmt(qty)})
                 self.pending_order = None
                 self.exchange_trade = None
                 self._persist()
