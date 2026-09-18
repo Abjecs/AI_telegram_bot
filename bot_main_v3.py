@@ -18,6 +18,8 @@ from trading.engine import TradingEngine
 
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
                     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logger = logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 engine = TradingEngine()
 subscribers: set[int] = set()
@@ -501,12 +503,12 @@ async def main():
     application=Application.builder().token(TELEGRAM_TOKEN).build()
     for cmd,handler in [("start",start),("help",help_command),("status",status),("signal",signal),("settings",settings),("set",set_command),("trading",trading_command),("mode",mode_command)]:
         application.add_handler(CommandHandler(cmd,handler))
-    application.add_handler(CallbackQueryHandler(callback))
+    application.add_handler(CallbackQueryHandler(callback, pattern=r".+"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_setting_input))
     await application.initialize(); await application.start()
     url=webhook_url()
     if url:
-        await application.bot.set_webhook(url=url,secret_token=WEBHOOK_TOKEN,drop_pending_updates=True)
+        await application.bot.set_webhook(url=url,secret_token=WEBHOOK_TOKEN,drop_pending_updates=True,allowed_updates=["message","callback_query"])
     asyncio.create_task(engine_loop())
     server=web.Application(); server.router.add_get("/",health); server.router.add_get("/health",health); server.router.add_post("/webhook",webhook)
     runner=web.AppRunner(server); await runner.setup(); await web.TCPSite(runner,"0.0.0.0",PORT).start()
