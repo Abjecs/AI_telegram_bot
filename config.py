@@ -38,7 +38,6 @@ TRADING_ENABLED = os.getenv("TRADING_ENABLED", "true").lower() in {"1","true","y
 TRADING_MODE = os.getenv("TRADING_MODE", "PAPER").upper().strip()
 if TRADING_MODE not in {"PAPER","DEMO","LIVE"}:
     TRADING_MODE = "PAPER"
-# Backward compatibility: old DRY_RUN=true means PAPER; old false means LIVE.
 if "TRADING_MODE" not in os.environ and "DRY_RUN" in os.environ:
     TRADING_MODE = "PAPER" if os.getenv("DRY_RUN","true").lower() in {"1","true","yes","on"} else "LIVE"
 DRY_RUN = TRADING_MODE == "PAPER"
@@ -59,7 +58,9 @@ MIN_ATR_PCT = _float("MIN_ATR_PCT", 0.08)
 MAX_ATR_PCT = _float("MAX_ATR_PCT", 3.0)
 AI_REANALYSIS_MINUTES = _int("AI_REANALYSIS_MINUTES", 15, 1)
 PROPOSAL_EXPIRY_SECONDS = _int("PROPOSAL_EXPIRY_SECONDS", 120, 30)
-ENTRY_MAX_MOVE_ATR = _float("ENTRY_MAX_MOVE_ATR", 0.35, 0.05)
+# Allow normal short-term movement between proposal delivery and manual confirmation.
+# The confirmation still rejects materially stale proposals.
+ENTRY_MAX_MOVE_ATR = _float("ENTRY_MAX_MOVE_ATR", 1.0, 0.05)
 
 AI_ENABLED = os.getenv("AI_ENABLED", "true").lower() in {"1","true","yes","on"}
 AI_FAIL_CLOSED = os.getenv("AI_FAIL_CLOSED", "true").lower() in {"1","true","yes","on"}
@@ -67,6 +68,5 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
 AI_MODEL = os.getenv("AI_MODEL", "gpt-5.6-luna").strip()
 
-# LIVE is never enabled merely by possessing a key; Telegram confirmation is still required.
 if TRADING_ENABLED and TRADING_MODE == "LIVE" and (not BYBIT_API_KEY or not BYBIT_API_SECRET):
     raise RuntimeError("LIVE trading requires BYBIT_API_KEY and BYBIT_API_SECRET")
