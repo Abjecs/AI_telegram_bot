@@ -223,18 +223,14 @@ class TradingEngine:
                     return None
                 self._reset_day(equity)
 
-                if not TRADING_ENABLED or self.trades_today >= MAX_TRADES_PER_DAY:
-                    return None
-                if self._daily_limit() and self.realized_today <= -self._daily_limit():
-                    return None
+                # Existing orders/positions are always managed, even when new entries are OFF.
                 if self.pending_order:
                     await self._monitor_pending_order()
                     return None
+
                 if TRADING_MODE != "PAPER" and await self.client.position(SYMBOL):
                     return None
 
-                # In PAPER mode, keep the simulated position marked to live market price.
-                # Do this before the normal candidate gate so SL/TP can actually trigger.
                 if self.paper_position:
                     ticker = await self.client.ticker(SYMBOL)
                     self.last_price = float(ticker.get("lastPrice", 0) or 0)
@@ -242,6 +238,11 @@ class TradingEngine:
                         await self.paper_monitor(self.last_price)
                     return None
 
+                # OFF means: no new proposals. It does not abandon an existing position/order.
+                if not TRADING_ENABLED or self.trades_today >= MAX_TRADES_PER_DAY:
+                    return None
+                if self._daily_limit() and self.realized_today <= -self._daily_limit():
+                    return None
                 if self._cooldown_active():
                     return None
 
