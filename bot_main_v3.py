@@ -132,7 +132,7 @@ def settings_text() -> str:
         f"AI-фильтр риска: ≤ {engine_module.MAX_AI_RISK_SCORE}/10\n"
         f"Торговля: {'ON' if engine_module.TRADING_ENABLED else 'OFF'}\n"
         f"Режим: {engine_module.TRADING_MODE}\n"
-        f"Капитал торговли: {engine_module.TRADE_CAPITAL_USDT:g} USDT (0 = баланс Bybit)\n"
+        f"Капитал для расчёта: {engine_module.TRADE_CAPITAL_USDT:g} USDT (0 = средства счёта)\n"
         f"PAPER капитал: {engine.paper_capital:g} USDT\n\n"
         "Риск сделки: 1% капитала. Цель: 1.5% капитала при RR 1:1.5."
     )
