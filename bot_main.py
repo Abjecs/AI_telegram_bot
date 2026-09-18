@@ -19,6 +19,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 engine = TradingEngine()
+subscribers: set[int] = set()
 
 SETTING_SPECS: dict[str, tuple[str, Callable[[str], object]]] = {
     "capital": ("CAPITAL_USDT", float),
@@ -41,7 +42,10 @@ BOOL_SETTINGS = {"trading": "TRADING_ENABLED", "paper": "DRY_RUN", "ai": "AI_ENA
 
 
 def _private(update: Update) -> bool:
-    return bool(update.effective_chat and update.effective_chat.type == "private")
+    if not (update.effective_chat and update.effective_chat.type == "private"):
+        return False
+    subscribers.add(update.effective_chat.id)
+    return True
 
 
 def _webhook_url() -> str | None:
@@ -388,6 +392,14 @@ async def main() -> None:
         await application.bot.set_webhook(url=webhook_url, secret_token=webhook_secret)
     else:
         logger.warning("Webhook URL is not configured; Telegram updates will not arrive until WEBHOOK_URL/RENDER_EXTERNAL_HOSTNAME is available.")
+
+    async def trade_event(text: str):
+        for chat_id in list(subscribers):
+            try:
+                await application.bot.send_message(chat_id=chat_id, text=text)
+            except Exception as exc:
+                logger.warning("Trade notification failed for chat %s: %s", chat_id, exc)
+    engine.event_callback = trade_event
 
     engine_task = asyncio.create_task(engine.run())
     logger.info("Bot started")
