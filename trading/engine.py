@@ -232,7 +232,17 @@ class TradingEngine:
                     return None
                 if TRADING_MODE != "PAPER" and await self.client.position(SYMBOL):
                     return None
-                if self.paper_position or self._cooldown_active():
+
+                # In PAPER mode, keep the simulated position marked to live market price.
+                # Do this before the normal candidate gate so SL/TP can actually trigger.
+                if self.paper_position:
+                    ticker = await self.client.ticker(SYMBOL)
+                    self.last_price = float(ticker.get("lastPrice", 0) or 0)
+                    if self.last_price > 0:
+                        await self.paper_monitor(self.last_price)
+                    return None
+
+                if self._cooldown_active():
                     return None
 
                 k5, k15 = await asyncio.gather(
