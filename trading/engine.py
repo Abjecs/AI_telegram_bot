@@ -235,7 +235,7 @@ class TradingEngine:
                     ticker = await self.client.ticker(SYMBOL)
                     self.last_price = float(ticker.get("lastPrice", 0) or 0)
                     if self.last_price > 0:
-                        await self.paper_monitor(self.last_price)
+                        await self.paper_monitor(self.last_price, ticker=ticker)
                     return None
 
                 # OFF means: no new proposals. It does not abandon an existing position/order.
@@ -452,29 +452,25 @@ class TradingEngine:
         except Exception as exc:
             self.last_error = str(exc)
 
-    async def paper_monitor(self, price):
+    async def paper_monitor(self, price, ticker=None):
         position = self.paper_position
         if not position:
             return
         side = position["side"]
-        hit = (
-            side == "Buy" and (price <= position["stop"] or price >= position["take"])
-        ) or (
-            side == "Sell" and (price >= position["stop"] or price <= position["take"])
-        )
-        if not hit:
+        stop = float(position["stop"])
+        take = float(position["take"])
+        hit_stop = (side == "Buy" and price <= stop) or (side == "Sell" and price >= stop)
+        hit_take = (side == "Buy" and price >= take) or (side == "Sell" and price <= take)
+        if not hit_stop and not hit_take:
             return
-        take_hit = (
-            side == "Buy" and price >= position["take"]
-        ) or (
-            side == "Sell" and price <= position["take"]
-        )
-        exit_price = position["take"] if take_hit else position["stop"]
-        pnl = (exit_price - position["entry"]) * position["qty"] * (1 if side == "Buy" else -1)
+        result = "TP" if hit_take and not hit_stop else "SL"
+        exit_price = take if result == "TP" else stop
+        direction = 1 if side == "Buy" else -1
+        pnl = (exit_price - float(position["entry"])) * float(position["qty"]) * direction
         self.realized_today += pnl
+        self.paper_capital = max(0.0, self.paper_capital + pnl)
         append_journal(self.state, "PAPER_CLOSE", {
-            **position, "exit": exit_price, "pnl": pnl,
-            "result": "TP" if take_hit else "SL",
+            **position, "exit": exit_price, "pnl": pnl, "result": result,
         })
         self.paper_position = None
         self._persist()
@@ -519,9 +515,12 @@ class TradingEngine:
     def set_paper_capital(self, amount: float):
         if amount <= 0:
             raise ValueError("paper capital must be > 0")
+        if self.paper_position or self.pending_order:
+            raise ValueError("Нельзя менять капитал при активной позиции или заявке")
         self.paper_capital = float(amount)
-        if TRADING_MODE == "PAPER" and not self.paper_position:
+        if TRADING_MODE == "PAPER":
             self.starting_equity = self.paper_capital
+            self.realized_today = 0.0
         self._persist()
 
     async def run(self):
