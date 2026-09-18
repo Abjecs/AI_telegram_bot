@@ -12,6 +12,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 import config as config_module
 import trading.engine as engine_module
+from trading.state import save
 from config import LOG_LEVEL, PORT, RENDER_EXTERNAL_HOSTNAME, TELEGRAM_TOKEN, WEBHOOK_SECRET, WEBHOOK_URL
 from trading.engine import TradingEngine
 
@@ -20,6 +21,25 @@ logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO),
 logger = logging.getLogger(__name__)
 engine = TradingEngine()
 subscribers: set[int] = set()
+
+PERSISTED_SETTINGS = ("SYMBOL", "LEVERAGE", "MAX_DAILY_LOSS_PCT", "TARGET_RR",
+                      "MAX_TRADES_PER_DAY", "COOLDOWN_MINUTES", "POLL_SECONDS",
+                      "MAX_AI_RISK_SCORE", "TRADING_ENABLED", "TRADING_MODE")
+
+def restore_settings() -> None:
+    settings = engine.state.get("settings", {})
+    for name in PERSISTED_SETTINGS:
+        if name in settings:
+            setattr(config_module, name, settings[name])
+            setattr(engine_module, name, settings[name])
+    config_module.DRY_RUN = engine_module.TRADING_MODE == "PAPER"
+    engine_module.DRY_RUN = config_module.DRY_RUN
+
+def persist_settings() -> None:
+    engine.state["settings"] = {name: getattr(engine_module, name) for name in PERSISTED_SETTINGS}
+    save(engine.state)
+
+restore_settings()
 application: Application
 WEBHOOK_TOKEN = WEBHOOK_SECRET or secrets.token_urlsafe(32)
 
@@ -162,6 +182,7 @@ def set_mode(mode: str):
             raise ValueError("Для LIVE нужны LIVE API ключ и секрет в Render.")
     engine_module.TRADING_MODE = mode
     engine_module.DRY_RUN = mode == "PAPER"
+    persist_settings()
     config_module.TRADING_MODE = mode
     config_module.DRY_RUN = mode == "PAPER"
     engine.live_armed = False
@@ -211,6 +232,7 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             engine_module.MAX_AI_RISK_SCORE=value
         else:
             raise ValueError("Параметр не настраивается пользователем")
+        persist_settings()
         await update.effective_message.reply_text(f"✅ {name} = {context.args[1]}")
     except (ValueError, TypeError) as exc:
         await update.effective_message.reply_text(f"❌ {exc}")
@@ -218,6 +240,7 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def trading_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not private(update) or len(context.args) != 1: return
     engine_module.TRADING_ENABLED = context.args[0].lower() in {"on","true","1"}
+    persist_settings()
     await update.effective_message.reply_text(f"Торговля: {'ON' if engine_module.TRADING_ENABLED else 'OFF'}")
 
 async def mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -262,6 +285,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🔴 LIVE ARMED. Новые ордера всё равно требуют подтверждения каждого предложения.",reply_markup=menu()); return
     if d=="toggle_trading":
         engine_module.TRADING_ENABLED=not engine_module.TRADING_ENABLED
+        persist_settings()
         await q.edit_message_text(f"Торговля: {'ON' if engine_module.TRADING_ENABLED else 'OFF'}",reply_markup=menu()); return
     if d.startswith("confirm:"):
         ok,msg=await engine.confirm_proposal(d.split(":",1)[1])
