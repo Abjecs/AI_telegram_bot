@@ -226,6 +226,19 @@ class TradingEngine:
         except Exception as exc:
             logger.warning("Trade notification failed: %s", exc)
 
+    async def _disable_after_trade(self, reason="Сделка завершена"):
+        """Stop proposing new trades after any completed trade until the user enables Trading again."""
+        global TRADING_ENABLED
+        TRADING_ENABLED = False
+        self.pending_proposal = None
+        self.pending_order = None
+        self.last_ai_hash = ""
+        self._persist()
+        await self._emit_event(
+            f"⏸ Торговля автоматически выключена после сделки.\\n{reason}\\n"
+            "Чтобы продолжить, включи «Торговля» в боте."
+        )
+
     async def _handle_exchange_close(self):
         trade = self.exchange_trade
         if not trade:
@@ -256,6 +269,7 @@ class TradingEngine:
                 f"{'🟢' if pnl >= 0 else '🔴'} {TRADING_MODE}: позиция закрыта.\n"
                 f"{SYMBOL}\nРезультат: {result}\nP&L: {pnl:+.4f} USDT"
             )
+            await self._disable_after_trade(f"Результат: {result}, P&L {pnl:+.4f} USDT")
         except Exception as exc:
             self.last_error = str(exc)
             logger.warning("Exchange close check failed: %s", exc)
@@ -523,6 +537,7 @@ class TradingEngine:
                         f"{'🟢' if pnl >= 0 else '🔴'} PAPER: позиция закрыта вручную.\n"
                         f"{SYMBOL}\nВыход: {exit_price:.4f}\nP&L: {pnl:+.4f} USDT"
                     )
+                    await self._disable_after_trade(f"Результат: MANUAL, P&L {pnl:+.4f} USDT")
                     return True, f"PAPER: позиция закрыта по {self._fmt(exit_price)}. P&L {pnl:+.4f} USDT"
 
                 position = await self.client.position(SYMBOL)
@@ -539,6 +554,7 @@ class TradingEngine:
                 await self._emit_event(
                     f"🟠 {TRADING_MODE}: отправлено закрытие позиции.\n{SYMBOL}\nРазмер: {qty:g}"
                 )
+                await self._disable_after_trade("Ручное закрытие позиции")
                 return True, f"{TRADING_MODE}: команда закрытия отправлена."
             except Exception as exc:
                 self.last_error = str(exc)
@@ -622,6 +638,7 @@ class TradingEngine:
             f"{SYMBOL}\nРезультат: {result}\nВыход: {exit_price:.4f}\n"
             f"P&L: {pnl:+.4f} USDT\nКапитал: {self.paper_capital:.4f} USDT"
         )
+        await self._disable_after_trade(f"Результат: {result}, P&L {pnl:+.4f} USDT")
 
     async def status(self):
         balance = 0.0
