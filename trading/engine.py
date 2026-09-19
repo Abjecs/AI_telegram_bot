@@ -230,6 +230,7 @@ class TradingEngine:
         """Stop proposing new trades after any completed trade until the user enables Trading again."""
         global TRADING_ENABLED
         TRADING_ENABLED = False
+        self.state.setdefault("settings", {})["TRADING_ENABLED"] = False
         self.pending_proposal = None
         self.pending_order = None
         self.last_ai_hash = ""
